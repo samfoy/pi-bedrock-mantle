@@ -13,7 +13,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Sha256 } from "@aws-crypto/sha256-js";
-import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
+import { fromIni, fromNodeProviderChain } from "@aws-sdk/credential-providers";
 import { SignatureV4 } from "@smithy/signature-v4";
 
 /** Port for the us-east-2 proxy (GPT-5.x and shared OpenAI-style models). Override with BEDROCK_MANTLE_PROXY_PORT_CMH. */
@@ -41,8 +41,14 @@ const DROP_RESPONSE = new Set(["content-encoding", "transfer-encoding", "connect
  */
 function makeSigner(region: string): SignatureV4 {
   const profile = process.env.BEDROCK_MANTLE_AWS_PROFILE;
+  // Use fromIni when an explicit profile is set — fromNodeProviderChain
+  // reads AWS_PROFILE from env which may be clobbered by other extensions
+  // (e.g. pi-provider-claude-code sets AWS_PROFILE=claude-code-DO-NOT-DELETE).
+  const credentials = profile
+    ? fromIni({ profile })
+    : fromNodeProviderChain();
   return new SignatureV4({
-    credentials: fromNodeProviderChain(profile ? { profile } : undefined),
+    credentials,
     service: "bedrock",
     region,
     sha256: Sha256,
