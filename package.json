@@ -1,7 +1,7 @@
 {
   "name": "pi-bedrock-mantle",
   "private": false,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Pi extension: all Bedrock Mantle models (GPT-5.5, DeepSeek, Qwen3, Mistral, Kimi, ...) via SigV4 — no long-term API key needed",
   "author": "Sam Fanning",
   "license": "MIT",
@@ -21,9 +21,10 @@
   },
   "type": "module",
   "scripts": {
-    "clean": "echo 'nothing to clean'",
+    "clean": "rm -rf .tmp-test",
     "build": "echo 'nothing to build'",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "rm -rf .tmp-test && tsc --noEmit false --outDir .tmp-test && node --test test/*.test.mjs"
   },
   "files": [
     "index.ts",

@@ -9,15 +9,20 @@
  *       baseUrl: http://localhost:57891/anthropic   (pi appends /v1/messages)
  *       headers: { anthropic-version: "2023-06-01" }
  *
- *   - All other models (OpenAI-style):
+ *   - GPT-5.x models:
  *       api: "openai-responses"
  *       baseUrl: http://localhost:57893/openai/v1   (pi appends /responses)
- *       Region preference: us-east-2 when available (GPT-5.x is us-east-2 only),
- *       fallback to us-east-1 for models only available there.
+ *
+ *   - Other OpenAI-compatible models:
+ *       api: "openai-completions"
+ *       baseUrl: http://localhost:57893/v1          (pi appends /chat/completions)
+ *
+ *   OpenAI-compatible route preference is us-east-2 when available, with
+ *   fallback to us-east-1 for models only available there.
  */
 
 import { Sha256 } from "@aws-crypto/sha256-js";
-import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
+import { fromIni, fromNodeProviderChain } from "@aws-sdk/credential-providers";
 import { SignatureV4 } from "@smithy/signature-v4";
 import { PROXY_PORT_CMH, PROXY_PORT_IAD } from "./proxy.js";
 
@@ -47,10 +52,10 @@ interface ModelSpec {
 
 const KNOWN: Record<string, ModelSpec> = {
   // OpenAI GPT-5 — us-east-2 only
-  "openai.gpt-5.5":              { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high" } },
-  "openai.gpt-5.5-2026-04-23":   { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high" } },
-  "openai.gpt-5.4":              { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high" } },
-  "openai.gpt-5.4-2026-03-05":   { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high" } },
+  "openai.gpt-5.5":              { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { off: null, xhigh: "xhigh" } },
+  "openai.gpt-5.5-2026-04-23":   { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { off: null, xhigh: "xhigh" } },
+  "openai.gpt-5.4":              { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { off: null, xhigh: "xhigh" } },
+  "openai.gpt-5.4-2026-03-05":   { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { off: null, xhigh: "xhigh" } },
   // OpenAI OSS
   "openai.gpt-oss-120b":           { contextWindow: 128000, maxTokens: 16384, reasoning: false, input: ["text"] },
   "openai.gpt-oss-20b":            { contextWindow: 128000, maxTokens: 16384, reasoning: false, input: ["text"] },
@@ -102,7 +107,9 @@ function inferSpec(id: string): ModelSpec {
     id.includes("gpt-5") || id.includes("palmyra") || id.startsWith("anthropic.");
 
   const thinkingLevelMap = reasoning
-    ? { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh" }
+    ? id.includes("gpt-5")
+      ? { off: null, xhigh: "xhigh" }
+      : { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh" }
     : undefined;
 
   return {
@@ -189,7 +196,7 @@ function buildConfig(id: string, regions: Set<string>): PiModelConfig {
   // All other providers (DeepSeek, Qwen, Mistral, Kimi, MiniMax, NVIDIA, Gemma,
   // ZAI, Writer, openai.gpt-oss-*): use the OpenAI Chat Completions API.
   // pi's openai-completions driver calls {baseUrl}/chat/completions →
-    //   http://localhost:57893/v1/chat/completions →
+  //   http://localhost:57893/v1/chat/completions →
   //   https://bedrock-mantle.us-east-2.api.aws/v1/chat/completions ✓
   return {
     ...base,
@@ -204,8 +211,14 @@ const REGIONS = ["us-east-1", "us-east-2"] as const;
 
 async function fetchRegionModels(region: string): Promise<string[]> {
   const host = `bedrock-mantle.${region}.api.aws`;
+  const profile = process.env.BEDROCK_MANTLE_AWS_PROFILE;
+  // Match proxy.ts: prefer the extension-specific profile when set instead of
+  // relying on AWS_PROFILE/default chain, which other pi extensions may clobber.
+  const credentials = profile
+    ? fromIni({ profile })
+    : fromNodeProviderChain();
   const signer = new SignatureV4({
-    credentials: fromNodeProviderChain(),
+    credentials,
     service: "bedrock",
     region,
     sha256: Sha256,
@@ -236,7 +249,14 @@ export async function fetchModels(): Promise<PiModelConfig[]> {
       }
     }
 
-    if (modelRegions.size === 0) throw new Error("All regions failed");
+    if (modelRegions.size === 0) {
+      const reasons = results.map((result, i) => {
+        if (result.status === "fulfilled") return `${REGIONS[i]}: no models returned`;
+        const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+        return `${REGIONS[i]}: ${reason}`;
+      });
+      throw new Error(`All regions failed (${reasons.join("; ")})`);
+    }
 
     return Array.from(modelRegions.entries()).map(([id, regions]) =>
       buildConfig(id, regions)

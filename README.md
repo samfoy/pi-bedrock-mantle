@@ -25,10 +25,13 @@ Falls back to a curated static list if discovery fails (expired creds at startup
 
 ## How it works
 
-1. At startup, fetches the live model list from `bedrock-mantle.us-east-2.api.aws/v1/models` using SigV4.
-2. Starts a lightweight HTTP proxy on `localhost:57893`.
-3. Pi's built-in `openai-responses` driver sends inference requests to the proxy.
-4. The proxy SigV4-signs each request (via `fromNodeProviderChain` — picks up ada/env/config creds automatically) and forwards to `bedrock-mantle.us-east-2.api.aws/openai/v1/responses`.
+1. At startup, fetches the live model list from both `bedrock-mantle.us-east-1.api.aws/v1/models` and `bedrock-mantle.us-east-2.api.aws/v1/models` using SigV4, then merges the regional results.
+2. Starts lightweight regional HTTP proxies on `localhost:57893` (us-east-2/CMH) and `localhost:57891` (us-east-1/IAD).
+3. Pi sends inference requests to the regional proxy using the API driver selected per model:
+   - Anthropic Claude → `anthropic-messages` via `/anthropic/v1/messages`
+   - GPT-5.x → `openai-responses` via `/openai/v1/responses`
+   - GPT OSS and other OpenAI-compatible models → `openai-completions` via `/v1/chat/completions`
+4. The proxy SigV4-signs each request (via `fromNodeProviderChain` — picks up ada/env/config creds automatically) and forwards it to the matching Bedrock Mantle regional endpoint.
 5. Streaming SSE responses are piped back to pi unchanged.
 
 If multiple pi sessions are running, the first one starts the proxy; subsequent ones reuse it.
@@ -86,13 +89,12 @@ pi --model bedrock-mantle/openai.gpt-5.5
 
 ## Credential options
 
-The proxy uses [`fromNodeProviderChain`](https://docs.aws.amazon.com/AWSJavaScriptSDK/v3/latest/Package/-aws-sdk-credential-providers/) which tries these in order:
+The extension and proxy first honor `BEDROCK_MANTLE_AWS_PROFILE` via `fromIni({ profile })` (recommended, because other pi extensions may set `AWS_PROFILE`). If that is unset, they fall back to [`fromNodeProviderChain`](https://docs.aws.amazon.com/AWSJavaScriptSDK/v3/latest/Package/-aws-sdk-credential-providers/), which tries:
 
-1. `BEDROCK_MANTLE_AWS_PROFILE` env var (explicit override — recommended)
-2. `AWS_PROFILE` env var
-3. `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` env vars
-4. `~/.aws/credentials` + `~/.aws/config`
-5. EC2/ECS instance metadata
+1. `AWS_PROFILE` env var
+2. `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` env vars
+3. `~/.aws/credentials` + `~/.aws/config`
+4. EC2/ECS instance metadata
 
 ## Troubleshooting
 
@@ -104,4 +106,4 @@ The proxy uses [`fromNodeProviderChain`](https://docs.aws.amazon.com/AWSJavaScri
 
 **HTTP 403** — account not allowlisted for bedrock-mantle.
 
-**Proxy port conflict** — if something else is on port 57893 or 57891, change `PROXY_PORT` in `proxy.ts`.
+**Proxy port conflict** — if something else is on port 57893 or 57891, set `BEDROCK_MANTLE_PROXY_PORT_CMH` or `BEDROCK_MANTLE_PROXY_PORT_IAD` to another valid port.
