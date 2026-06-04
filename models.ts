@@ -58,9 +58,9 @@ const KNOWN: Record<string, ModelSpec> = {
   "openai.gpt-oss-safeguard-20b":  { contextWindow: 128000, maxTokens: 4096,  reasoning: false, input: ["text"] },
   // Anthropic — us-east-1 only
   // opus-4-7: adaptive thinking (reasoning summaries via display:summarized); effort levels low/medium/high/xhigh
-  "anthropic.claude-opus-4-7":   { contextWindow: 200000, maxTokens: 32000,  reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh" } },
-  // opus-4-8: budget-based extended thinking
-  "anthropic.claude-opus-4-8":   { contextWindow: 200000, maxTokens: 32000,  reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh" } },
+  "anthropic.claude-opus-4-7":   { contextWindow: 1000000, maxTokens: 32000,  reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh" } },
+  // opus-4-8: adaptive thinking (1M context); budget-based extended thinking
+  "anthropic.claude-opus-4-8":   { contextWindow: 1000000, maxTokens: 32000,  reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh" } },
   // haiku-4-5: budget-based extended thinking
   "anthropic.claude-haiku-4-5":  { contextWindow: 200000, maxTokens: 16000,  reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh" } },
   // DeepSeek
