@@ -8,9 +8,10 @@
  *   - localhost:57893  →  bedrock-mantle.us-east-2.api.aws  (GPT-5.x + shared)
  *   - localhost:57891  →  bedrock-mantle.us-east-1.api.aws  (Anthropic Claude)
  *
- * Anthropic models use pi's anthropic-messages driver; everything else uses
- * openai-responses. Per-model baseUrl overrides route each model to the right
- * proxy automatically.
+ * Anthropic models use pi's anthropic-messages driver, GPT-5.x uses pi's
+ * openai-responses driver, and GPT OSS / other OpenAI-compatible models use
+ * openai-completions. Per-model baseUrl overrides route each model to the
+ * right proxy automatically.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";

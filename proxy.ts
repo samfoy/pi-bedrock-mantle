@@ -16,11 +16,24 @@ import { Sha256 } from "@aws-crypto/sha256-js";
 import { fromIni, fromNodeProviderChain } from "@aws-sdk/credential-providers";
 import { SignatureV4 } from "@smithy/signature-v4";
 
+export function parsePortEnv(name: string, defaultPort: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return defaultPort;
+
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1 || value > 65535) {
+    throw new Error(
+      `[bedrock-mantle] Invalid ${name}=${JSON.stringify(raw)}; expected an integer port from 1 to 65535.`
+    );
+  }
+  return value;
+}
+
 /** Port for the us-east-2 proxy (GPT-5.x and shared OpenAI-style models). Override with BEDROCK_MANTLE_PROXY_PORT_CMH. */
-export const PROXY_PORT_CMH = parseInt(process.env.BEDROCK_MANTLE_PROXY_PORT_CMH ?? "57893", 10);
+export const PROXY_PORT_CMH = parsePortEnv("BEDROCK_MANTLE_PROXY_PORT_CMH", 57893);
 
 /** Port for the us-east-1 proxy (Anthropic models via anthropic-messages API). Override with BEDROCK_MANTLE_PROXY_PORT_IAD. */
-export const PROXY_PORT_IAD = parseInt(process.env.BEDROCK_MANTLE_PROXY_PORT_IAD ?? "57891", 10);
+export const PROXY_PORT_IAD = parsePortEnv("BEDROCK_MANTLE_PROXY_PORT_IAD", 57891);
 
 // Headers that must not be forwarded upstream (hop-by-hop + auth).
 const DROP_REQUEST = new Set([
