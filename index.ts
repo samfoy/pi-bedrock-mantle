@@ -29,9 +29,11 @@ async function ensureProxy(port: number, region: string): Promise<void> {
 }
 
 export default async function bedrockMantleExtension(pi: ExtensionAPI): Promise<void> {
-  // Honor explicit profile override before the credential chain resolves.
+  // Credentials are resolved per-request in the proxy (not at startup), so
+  // BEDROCK_MANTLE_AWS_PROFILE takes effect on every call even when the proxy
+  // is shared across sessions. We no longer clobber AWS_PROFILE globally.
   const profile = process.env.BEDROCK_MANTLE_AWS_PROFILE;
-  if (profile) process.env.AWS_PROFILE = profile;
+  const profileLabel = profile ? `profile=${profile}` : "default credential chain";
 
   // Start both regional proxies (or reuse existing ones).
   const [cmhErr, iadErr] = await Promise.allSettled([
@@ -39,10 +41,21 @@ export default async function bedrockMantleExtension(pi: ExtensionAPI): Promise<
     ensureProxy(PROXY_PORT_IAD, "us-east-1"),
   ]);
 
-  if (cmhErr.status === "rejected" && iadErr.status === "rejected") {
+  const cmhOwned = cmhErr.status === "fulfilled";
+  const iadOwned = iadErr.status === "fulfilled";
+
+  if (!cmhOwned && !iadOwned) {
     console.error("[bedrock-mantle] Both proxies failed to start — aborting registration.");
     return;
   }
+
+  const proxyStatus = cmhOwned && iadOwned
+    ? `proxies started on :${PROXY_PORT_CMH}/:${PROXY_PORT_IAD}`
+    : cmhOwned
+      ? `proxy started on :${PROXY_PORT_CMH} (IAD reused)`
+      : `proxy started on :${PROXY_PORT_IAD} (CMH reused)`;
+
+  console.log(`[bedrock-mantle] ${proxyStatus} — signing with ${profileLabel}`);
 
   // Fetch live model list from both regions; falls back to curated static list.
   const models = await fetchModels();
