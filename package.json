@@ -5,10 +5,19 @@
   "description": "Pi extension: all Bedrock Mantle models (GPT-5.5, DeepSeek, Qwen3, Mistral, Kimi, ...) via SigV4 — no long-term API key needed",
   "author": "Sam Fanning",
   "license": "MIT",
-  "keywords": ["pi", "pi-extension", "bedrock", "bedrock-mantle", "gpt-5", "openai", "aws", "sigv4"],
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "bedrock",
+    "bedrock-mantle",
+    "gpt-5",
+    "openai",
+    "aws",
+    "sigv4"
+  ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/samfp/pi-bedrock-mantle"
+    "url": "git+https://github.com/samfp/pi-bedrock-mantle.git"
   },
   "type": "module",
   "scripts": {
@@ -16,6 +25,13 @@
     "build": "echo 'nothing to build'",
     "check": "tsc --noEmit"
   },
+  "files": [
+    "index.ts",
+    "proxy.ts",
+    "models.ts",
+    "README.md",
+    "LICENSE"
+  ],
   "pi": {
     "extensions": [
       "./index.ts"

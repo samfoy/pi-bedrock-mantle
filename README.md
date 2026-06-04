@@ -40,20 +40,20 @@ If multiple pi sessions are running, the first one starts the proxy; subsequent 
 ### 1. Install
 
 ```bash
-git clone <this-repo> ~/path/to/pi-bedrock-mantle
-cd ~/path/to/pi-bedrock-mantle
-npm install
+# Via pi (recommended)
+pi install npm:pi-bedrock-mantle
+
+# Or manually
+npm install -g pi-bedrock-mantle
 ```
 
 ### 2. Register with pi
 
-Add to `~/.pi/settings.json`:
+If installed via `pi install`, it's already active. Otherwise add to `~/.pi/settings.json`:
 
 ```json
 {
-  "packages": [
-    "/path/to/pi-bedrock-mantle"
-  ]
+  "packages": ["npm:pi-bedrock-mantle"]
 }
 ```
 
