@@ -16,11 +16,11 @@ import { Sha256 } from "@aws-crypto/sha256-js";
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 import { SignatureV4 } from "@smithy/signature-v4";
 
-/** Port for the us-east-2 proxy (GPT-5.x and shared OpenAI-style models). */
-export const PROXY_PORT_CMH = 57893;
+/** Port for the us-east-2 proxy (GPT-5.x and shared OpenAI-style models). Override with BEDROCK_MANTLE_PROXY_PORT_CMH. */
+export const PROXY_PORT_CMH = parseInt(process.env.BEDROCK_MANTLE_PROXY_PORT_CMH ?? "57893", 10);
 
-/** Port for the us-east-1 proxy (Anthropic models via anthropic-messages API). */
-export const PROXY_PORT_IAD = 57891;
+/** Port for the us-east-1 proxy (Anthropic models via anthropic-messages API). Override with BEDROCK_MANTLE_PROXY_PORT_IAD. */
+export const PROXY_PORT_IAD = parseInt(process.env.BEDROCK_MANTLE_PROXY_PORT_IAD ?? "57891", 10);
 
 // Headers that must not be forwarded upstream (hop-by-hop + auth).
 const DROP_REQUEST = new Set([
