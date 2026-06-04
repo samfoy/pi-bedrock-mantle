@@ -4,9 +4,7 @@ Pi extension: all [Amazon Bedrock Mantle](https://bedrock-mantle.us-east-2.api.a
 
 ## Why SigV4?
 
-Bedrock-mantle accepts both a long-term `AWS_BEARER_TOKEN_BEDROCK` key *and* standard SigV4-signed requests. SigV4 uses IAM/STS credentials — the same ones `ada`/Isengard already provides on Amazon developer machines. No extra key to provision, rotate, or store.
-
-Credit to [Mikey O'Brien](https://github.com/mikeyobrien) for confirming SigV4 works against bedrock-mantle.
+Bedrock-mantle accepts both a long-term `AWS_BEARER_TOKEN_BEDROCK` key *and* standard SigV4-signed requests. 
 
 ## Models
 
@@ -65,14 +63,10 @@ Add to `~/.aws/config`:
 [profile bedrock-mantle]
 region=us-east-2
 output=json
-credential_process=timeout 10 ada credentials print \
-  --account=<your-account-id> \
-  --provider=conduit \
-  --role=IibsAdminAccess-DO-NOT-DELETE \
-  --format=json
+credential_process=...
 ```
 
-Add to `~/.zshrc`:
+Add to shell init:
 
 ```bash
 export BEDROCK_MANTLE_AWS_PROFILE=bedrock-mantle
@@ -104,12 +98,10 @@ The proxy uses [`fromNodeProviderChain`](https://docs.aws.amazon.com/AWSJavaScri
 
 **Models don't appear** — extension not loading. Check that the path in `settings.json` is correct and `npm install` has been run.
 
-**`[bedrock-mantle] Model discovery failed`** — AWS creds unavailable at startup. Models fall back to a static list. Run `ada credentials update` and restart pi to get the live list.
+**`[bedrock-mantle] Model discovery failed`** — AWS creds unavailable at startup. Models fall back to a static list. 
 
 **HTTP 401** — role doesn't have `bedrock-mantle:CreateInference`. Use a role with Bedrock access (e.g. `IibsAdminAccess-DO-NOT-DELETE` on your personal dev account).
 
-**HTTP 403** — account not allowlisted for bedrock-mantle. Your personal dev account should work.
+**HTTP 403** — account not allowlisted for bedrock-mantle.
 
-**HTTP 400 on reasoning models** — GPT-5.x rejects effort `"minimal"`. This is handled automatically via `thinkingLevelMap: { minimal: "low" }`.
-
-**Proxy port conflict** — if something else is on port 57893, change `PROXY_PORT` in `proxy.ts`.
+**Proxy port conflict** — if something else is on port 57893 or 57891, change `PROXY_PORT` in `proxy.ts`.
