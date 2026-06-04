@@ -131,9 +131,15 @@ function displayName(id: string): string {
 }
 
 // ─── Route assignment ─────────────────────────────────────────────────────────
-// Anthropic models need the anthropic-messages API and us-east-1 proxy.
-// Everything else uses the openai-responses API.
-// For shared models (both regions), prefer us-east-2 to keep GPT-5.x on the same proxy.
+// openai.gpt-5.* (and dated variants)  → openai-responses  on us-east-2
+// anthropic.*                          → anthropic-messages on us-east-1
+// everything else                      → openai-completions  on us-east-2 (or us-east-1 fallback)
+
+function isOpenAIResponses(id: string): boolean {
+  // Only the GPT-5 family uses the Responses API — gpt-oss-* and all other
+  // providers use the Chat Completions API instead.
+  return /^openai\.gpt-5\./.test(id);
+}
 
 function buildConfig(id: string, regions: Set<string>): PiModelConfig {
   const spec = KNOWN[id] ?? inferSpec(id);
@@ -159,11 +165,29 @@ function buildConfig(id: string, regions: Set<string>): PiModelConfig {
     };
   }
 
-  // OpenAI Responses API. Prefer us-east-2 when available (GPT-5.x lives there).
   const port = regions.has("us-east-2") ? PROXY_PORT_CMH : PROXY_PORT_IAD;
+
+  if (isOpenAIResponses(id)) {
+    // GPT-5.x family: uses the OpenAI Responses API.
+    // pi's openai-responses driver calls {baseUrl}/responses →
+    //   http://localhost:57893/openai/v1/responses →
+    //   https://bedrock-mantle.us-east-2.api.aws/openai/v1/responses ✓
+    return {
+      ...base,
+      api: "openai-responses",
+      baseUrl: `http://127.0.0.1:${port}/openai/v1`,
+    };
+  }
+
+  // All other providers (DeepSeek, Qwen, Mistral, Kimi, MiniMax, NVIDIA, Gemma,
+  // ZAI, Writer, openai.gpt-oss-*): use the OpenAI Chat Completions API.
+  // pi's openai-completions driver calls {baseUrl}/chat/completions →
+    //   http://localhost:57893/v1/chat/completions →
+  //   https://bedrock-mantle.us-east-2.api.aws/v1/chat/completions ✓
   return {
     ...base,
-    baseUrl: `http://127.0.0.1:${port}/openai/v1`,
+    api: "openai-completions",
+    baseUrl: `http://127.0.0.1:${port}/v1`,
   };
 }
 

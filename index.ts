@@ -49,10 +49,11 @@ export default async function bedrockMantleExtension(pi: ExtensionAPI): Promise<
 
   pi.registerProvider("bedrock-mantle", {
     name: "Bedrock Mantle",
-    // Default baseUrl (used by models that don't set their own) — us-east-2 proxy.
-    // Each model overrides this via its own baseUrl field as appropriate.
-    baseUrl: `http://127.0.0.1:${PROXY_PORT_CMH}/openai/v1`,
-    api: "openai-responses",
+    // Default api/baseUrl (overridden per-model via PiModelConfig fields).
+    // Most models use openai-completions; GPT-5.x uses openai-responses;
+    // Anthropic uses anthropic-messages. Each model sets its own baseUrl.
+    baseUrl: `http://127.0.0.1:${PROXY_PORT_CMH}/v1`,
+    api: "openai-completions",
     // apiKey required by pi's schema; unused — SigV4 auth is handled by the proxies.
     apiKey: "sigv4-via-proxy",
     authHeader: false,
