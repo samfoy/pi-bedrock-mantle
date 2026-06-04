@@ -47,19 +47,22 @@ interface ModelSpec {
 
 const KNOWN: Record<string, ModelSpec> = {
   // OpenAI GPT-5 — us-east-2 only
-  "openai.gpt-5.5":              { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low" } },
-  "openai.gpt-5.5-2026-04-23":   { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low" } },
-  "openai.gpt-5.4":              { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low" } },
-  "openai.gpt-5.4-2026-03-05":   { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low" } },
+  "openai.gpt-5.5":              { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high" } },
+  "openai.gpt-5.5-2026-04-23":   { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high" } },
+  "openai.gpt-5.4":              { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high" } },
+  "openai.gpt-5.4-2026-03-05":   { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high" } },
   // OpenAI OSS
   "openai.gpt-oss-120b":           { contextWindow: 128000, maxTokens: 16384, reasoning: false, input: ["text"] },
   "openai.gpt-oss-20b":            { contextWindow: 128000, maxTokens: 16384, reasoning: false, input: ["text"] },
   "openai.gpt-oss-safeguard-120b": { contextWindow: 128000, maxTokens: 4096,  reasoning: false, input: ["text"] },
   "openai.gpt-oss-safeguard-20b":  { contextWindow: 128000, maxTokens: 4096,  reasoning: false, input: ["text"] },
   // Anthropic — us-east-1 only
-  "anthropic.claude-opus-4-7":   { contextWindow: 200000, maxTokens: 32000,  reasoning: true,  input: ["text", "image"] },
-  "anthropic.claude-opus-4-8":   { contextWindow: 200000, maxTokens: 32000,  reasoning: true,  input: ["text", "image"] },
-  "anthropic.claude-haiku-4-5":  { contextWindow: 200000, maxTokens: 16000,  reasoning: true,  input: ["text", "image"] },
+  // opus-4-7: adaptive thinking (reasoning summaries via display:summarized); effort levels low/medium/high/xhigh
+  "anthropic.claude-opus-4-7":   { contextWindow: 200000, maxTokens: 32000,  reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh" } },
+  // opus-4-8: budget-based extended thinking
+  "anthropic.claude-opus-4-8":   { contextWindow: 200000, maxTokens: 32000,  reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh" } },
+  // haiku-4-5: budget-based extended thinking
+  "anthropic.claude-haiku-4-5":  { contextWindow: 200000, maxTokens: 16000,  reasoning: true,  input: ["text", "image"], thinkingLevelMap: { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh" } },
   // DeepSeek
   "deepseek.v3.1":               { contextWindow: 163840, maxTokens: 32768, reasoning: false, input: ["text"] },
   "deepseek.v3.2":               { contextWindow: 163840, maxTokens: 32768, reasoning: false, input: ["text"] },
@@ -98,12 +101,16 @@ function inferSpec(id: string): ModelSpec {
     id.includes("vision") || id.includes("-vl-") || id.includes("gemma") ||
     id.includes("gpt-5") || id.includes("palmyra") || id.startsWith("anthropic.");
 
+  const thinkingLevelMap = reasoning
+    ? { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh" }
+    : undefined;
+
   return {
     contextWindow: id.startsWith("anthropic.") ? 200000 : 128000,
     maxTokens: id.startsWith("anthropic.") ? 16000 : 16384,
     reasoning,
     input: hasVision ? ["text", "image"] : ["text"],
-    thinkingLevelMap: reasoning ? { minimal: "low" } : undefined,
+    thinkingLevelMap,
   };
 }
 
