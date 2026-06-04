@@ -32,17 +32,31 @@ const DROP_REQUEST = new Set([
 // Headers that must not be forwarded back to the caller.
 const DROP_RESPONSE = new Set(["content-encoding", "transfer-encoding", "connection"]);
 
-function makeHandler(region: string) {
-  const host = `bedrock-mantle.${region}.api.aws`;
-  const target = `https://${host}`;
-  const signer = new SignatureV4({
-    credentials: fromNodeProviderChain(),
+/**
+ * Build a fresh SignatureV4 signer that reads credentials from the current
+ * process env on every call. This is intentional: the proxy may be long-lived
+ * across pi sessions, and BEDROCK_MANTLE_AWS_PROFILE / AWS_PROFILE may differ
+ * per session. Resolving per-request means rotated credentials and env changes
+ * take effect immediately without restarting the proxy.
+ */
+function makeSigner(region: string): SignatureV4 {
+  const profile = process.env.BEDROCK_MANTLE_AWS_PROFILE;
+  return new SignatureV4({
+    credentials: fromNodeProviderChain(profile ? { profile } : undefined),
     service: "bedrock",
     region,
     sha256: Sha256,
   });
+}
+
+function makeHandler(region: string) {
+  const host = `bedrock-mantle.${region}.api.aws`;
+  const target = `https://${host}`;
 
   return async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // Create a fresh signer per-request so BEDROCK_MANTLE_AWS_PROFILE changes
+    // (e.g. from a newer pi session) are picked up without restarting the proxy.
+    const signer = makeSigner(region);
     try {
       // 1. Collect body
       const chunks: Buffer[] = [];
