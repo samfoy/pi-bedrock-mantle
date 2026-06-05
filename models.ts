@@ -21,6 +21,9 @@
  *   fallback to us-east-1 for models only available there.
  */
 
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { Sha256 } from "@aws-crypto/sha256-js";
 import { fromIni, fromNodeProviderChain } from "@aws-sdk/credential-providers";
 import { SignatureV4 } from "@smithy/signature-v4";
@@ -38,6 +41,83 @@ export interface PiModelConfig {
   maxTokens: number;
   headers?: Record<string, string>;
   thinkingLevelMap?: Partial<Record<string, string | null>>;
+}
+
+interface CachedModels {
+  version: 1;
+  generatedAt: number;
+  proxyPorts: { cmh: number; iad: number };
+  models: PiModelConfig[];
+}
+
+const CACHE_VERSION = 1;
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const CACHE_ENV = "BEDROCK_MANTLE_MODEL_CACHE";
+
+function cachePath(): string {
+  if (process.env[CACHE_ENV]) return process.env[CACHE_ENV]!;
+  const root = process.env.XDG_CACHE_HOME ?? join(process.env.HOME ?? tmpdir(), ".cache");
+  return join(root, "pi-bedrock-mantle", "models.json");
+}
+
+function isModelConfig(value: unknown): value is PiModelConfig {
+  if (!value || typeof value !== "object") return false;
+  const model = value as Partial<PiModelConfig>;
+  return typeof model.id === "string" &&
+    typeof model.name === "string" &&
+    typeof model.contextWindow === "number" &&
+    typeof model.maxTokens === "number" &&
+    typeof model.reasoning === "boolean" &&
+    Array.isArray(model.input) &&
+    typeof model.cost === "object";
+}
+
+function parseCachedModels(raw: string): CachedModels | null {
+  try {
+    const parsed = JSON.parse(raw) as Partial<CachedModels>;
+    if (parsed.version !== CACHE_VERSION) return null;
+    if (typeof parsed.generatedAt !== "number") return null;
+    if (parsed.proxyPorts?.cmh !== PROXY_PORT_CMH || parsed.proxyPorts?.iad !== PROXY_PORT_IAD) return null;
+    if (!Array.isArray(parsed.models) || !parsed.models.every(isModelConfig)) return null;
+    return parsed as CachedModels;
+  } catch {
+    return null;
+  }
+}
+
+export function readCachedModels(options: { maxAgeMs?: number } = {}): PiModelConfig[] | null {
+  const cached = (() => {
+    try {
+      return parseCachedModels(readFileSync(cachePath(), "utf8"));
+    } catch {
+      return null;
+    }
+  })();
+  if (!cached) return null;
+
+  const maxAgeMs = options.maxAgeMs;
+  if (maxAgeMs !== undefined && Date.now() - cached.generatedAt > maxAgeMs) return null;
+  return cached.models;
+}
+
+export function writeCachedModels(models: PiModelConfig[]): void {
+  const path = cachePath();
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tmp, JSON.stringify({
+    version: CACHE_VERSION,
+    generatedAt: Date.now(),
+    proxyPorts: { cmh: PROXY_PORT_CMH, iad: PROXY_PORT_IAD },
+    models,
+  }, null, 2));
+  renameSync(tmp, path);
+}
+
+export function fastModels(): PiModelConfig[] {
+  // Prefer a fresh cache, then a stale cache, then the curated static list. This
+  // keeps extension startup synchronous while preserving dynamic discovery once
+  // any previous run has populated the cache.
+  return readCachedModels({ maxAgeMs: CACHE_TTL_MS }) ?? readCachedModels() ?? FALLBACK_MODELS;
 }
 
 // ─── Known specs ─────────────────────────────────────────────────────────────
@@ -234,33 +314,39 @@ async function fetchRegionModels(region: string): Promise<string[]> {
   return data.data.map((m) => m.id);
 }
 
+export async function discoverModels(): Promise<PiModelConfig[]> {
+  const results = await Promise.allSettled(REGIONS.map(fetchRegionModels));
+
+  // Map model id → set of regions it's available in
+  const modelRegions = new Map<string, Set<string>>();
+  for (let i = 0; i < REGIONS.length; i++) {
+    const result = results[i];
+    if (result.status !== "fulfilled") continue;
+    for (const id of result.value) {
+      if (!modelRegions.has(id)) modelRegions.set(id, new Set());
+      modelRegions.get(id)!.add(REGIONS[i]);
+    }
+  }
+
+  if (modelRegions.size === 0) {
+    const reasons = results.map((result, i) => {
+      if (result.status === "fulfilled") return `${REGIONS[i]}: no models returned`;
+      const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+      return `${REGIONS[i]}: ${reason}`;
+    });
+    throw new Error(`All regions failed (${reasons.join("; ")})`);
+  }
+
+  return Array.from(modelRegions.entries()).map(([id, regions]) =>
+    buildConfig(id, regions)
+  );
+}
+
 export async function fetchModels(): Promise<PiModelConfig[]> {
   try {
-    const results = await Promise.allSettled(REGIONS.map(fetchRegionModels));
-
-    // Map model id → set of regions it's available in
-    const modelRegions = new Map<string, Set<string>>();
-    for (let i = 0; i < REGIONS.length; i++) {
-      const result = results[i];
-      if (result.status !== "fulfilled") continue;
-      for (const id of result.value) {
-        if (!modelRegions.has(id)) modelRegions.set(id, new Set());
-        modelRegions.get(id)!.add(REGIONS[i]);
-      }
-    }
-
-    if (modelRegions.size === 0) {
-      const reasons = results.map((result, i) => {
-        if (result.status === "fulfilled") return `${REGIONS[i]}: no models returned`;
-        const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
-        return `${REGIONS[i]}: ${reason}`;
-      });
-      throw new Error(`All regions failed (${reasons.join("; ")})`);
-    }
-
-    return Array.from(modelRegions.entries()).map(([id, regions]) =>
-      buildConfig(id, regions)
-    );
+    const models = await discoverModels();
+    writeCachedModels(models);
+    return models;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(

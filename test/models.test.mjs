@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { FALLBACK_MODELS, fetchModels } from "../.tmp-test/models.js";
+import { FALLBACK_MODELS, fastModels, fetchModels, writeCachedModels } from "../.tmp-test/models.js";
 
 function byId(id) {
   const model = FALLBACK_MODELS.find((candidate) => candidate.id === id);
@@ -14,6 +14,8 @@ function withFakeAwsCredentials() {
   process.env.AWS_ACCESS_KEY_ID = "test-access-key";
   process.env.AWS_SECRET_ACCESS_KEY = "test-secret-key";
   process.env.AWS_SESSION_TOKEN = "test-session-token";
+  process.env.BEDROCK_MANTLE_MODEL_CACHE = ".tmp-test/model-cache.json";
+  rmSync(process.env.BEDROCK_MANTLE_MODEL_CACHE, { force: true });
   delete process.env.AWS_PROFILE;
   delete process.env.BEDROCK_MANTLE_AWS_PROFILE;
 }
@@ -149,6 +151,8 @@ test("fetchModels honors BEDROCK_MANTLE_AWS_PROFILE instead of AWS_PROFILE", asy
   delete process.env.AWS_SESSION_TOKEN;
   process.env.AWS_SHARED_CREDENTIALS_FILE = ".tmp-test/aws-credentials";
   process.env.BEDROCK_MANTLE_AWS_PROFILE = "mantle-test";
+  process.env.BEDROCK_MANTLE_MODEL_CACHE = ".tmp-test/model-cache-profile.json";
+  rmSync(process.env.BEDROCK_MANTLE_MODEL_CACHE, { force: true });
   process.env.AWS_PROFILE = "missing-profile-that-should-be-ignored";
 
   const originalFetch = globalThis.fetch;
@@ -164,6 +168,7 @@ test("fetchModels honors BEDROCK_MANTLE_AWS_PROFILE instead of AWS_PROFILE", asy
     globalThis.fetch = originalFetch;
     delete process.env.AWS_SHARED_CREDENTIALS_FILE;
     delete process.env.BEDROCK_MANTLE_AWS_PROFILE;
+    delete process.env.BEDROCK_MANTLE_MODEL_CACHE;
     delete process.env.AWS_PROFILE;
   }
 });
@@ -173,4 +178,27 @@ test("fetchModels falls back to curated models when all regional discovery fails
     const models = await withMutedWarnings(() => fetchModels());
     assert.deepEqual(models.map((model) => model.id), FALLBACK_MODELS.map((model) => model.id));
   });
+});
+
+test("fastModels uses cached live discovery without performing network discovery", () => {
+  withFakeAwsCredentials();
+  const cached = [FALLBACK_MODELS.find((model) => model.id === "openai.gpt-oss-20b")];
+  assert.ok(cached[0]);
+  writeCachedModels(cached);
+
+  const models = fastModels();
+  assert.deepEqual(models.map((model) => model.id), ["openai.gpt-oss-20b"]);
+});
+
+test("fastModels rejects caches written for different proxy ports", () => {
+  withFakeAwsCredentials();
+  writeFileSync(process.env.BEDROCK_MANTLE_MODEL_CACHE, JSON.stringify({
+    version: 1,
+    generatedAt: Date.now(),
+    proxyPorts: { cmh: 1, iad: 2 },
+    models: [FALLBACK_MODELS.find((model) => model.id === "openai.gpt-oss-20b")],
+  }));
+
+  const models = fastModels();
+  assert.deepEqual(models.map((model) => model.id), FALLBACK_MODELS.map((model) => model.id));
 });

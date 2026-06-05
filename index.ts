@@ -15,7 +15,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { fetchModels } from "./models.js";
+import { discoverModels, fastModels, type PiModelConfig, writeCachedModels } from "./models.js";
 import { startProxy, PROXY_PORT_CMH, PROXY_PORT_IAD } from "./proxy.js";
 
 async function ensureProxy(port: number, region: string): Promise<void> {
@@ -29,38 +29,7 @@ async function ensureProxy(port: number, region: string): Promise<void> {
   }
 }
 
-export default async function bedrockMantleExtension(pi: ExtensionAPI): Promise<void> {
-  // Credentials are resolved per-request in the proxy (not at startup), so
-  // BEDROCK_MANTLE_AWS_PROFILE takes effect on every call even when the proxy
-  // is shared across sessions. We no longer clobber AWS_PROFILE globally.
-  const profile = process.env.BEDROCK_MANTLE_AWS_PROFILE;
-  const profileLabel = profile ? `profile=${profile}` : "default credential chain";
-
-  // Start both regional proxies (or reuse existing ones).
-  const [cmhErr, iadErr] = await Promise.allSettled([
-    ensureProxy(PROXY_PORT_CMH, "us-east-2"),
-    ensureProxy(PROXY_PORT_IAD, "us-east-1"),
-  ]);
-
-  const cmhOwned = cmhErr.status === "fulfilled";
-  const iadOwned = iadErr.status === "fulfilled";
-
-  if (!cmhOwned && !iadOwned) {
-    console.error("[bedrock-mantle] Both proxies failed to start — aborting registration.");
-    return;
-  }
-
-  const proxyStatus = cmhOwned && iadOwned
-    ? `proxies started on :${PROXY_PORT_CMH}/:${PROXY_PORT_IAD}`
-    : cmhOwned
-      ? `proxy started on :${PROXY_PORT_CMH} (IAD reused)`
-      : `proxy started on :${PROXY_PORT_IAD} (CMH reused)`;
-
-  console.log(`[bedrock-mantle] ${proxyStatus} — signing with ${profileLabel}`);
-
-  // Fetch live model list from both regions; falls back to curated static list.
-  const models = await fetchModels();
-
+function registerBedrockMantleProvider(pi: ExtensionAPI, models: PiModelConfig[]): void {
   pi.registerProvider("bedrock-mantle", {
     name: "Bedrock Mantle",
     // Default api/baseUrl (overridden per-model via PiModelConfig fields).
@@ -73,4 +42,59 @@ export default async function bedrockMantleExtension(pi: ExtensionAPI): Promise<
     authHeader: false,
     models,
   });
+}
+
+export default async function bedrockMantleExtension(pi: ExtensionAPI): Promise<void> {
+  // Credentials are resolved per-request in the proxy (not at startup), so
+  // BEDROCK_MANTLE_AWS_PROFILE takes effect on every call even when the proxy
+  // is shared across sessions. We no longer clobber AWS_PROFILE globally.
+  const profile = process.env.BEDROCK_MANTLE_AWS_PROFILE;
+  const profileLabel = profile ? `profile=${profile}` : "default credential chain";
+
+  // Keep local proxy bind on the startup path so the first request has a
+  // listener, but do not block on remote /v1/models discovery.
+  const [cmhErr, iadErr] = await Promise.allSettled([
+    ensureProxy(PROXY_PORT_CMH, "us-east-2"),
+    ensureProxy(PROXY_PORT_IAD, "us-east-1"),
+  ]);
+
+  const cmhReady = cmhErr.status === "fulfilled";
+  const iadReady = iadErr.status === "fulfilled";
+
+  if (!cmhReady && !iadReady) {
+    console.error("[bedrock-mantle] Both proxies failed to start — aborting registration.");
+    return;
+  }
+
+  const proxyStatus = cmhReady && iadReady
+    ? `proxies ready on :${PROXY_PORT_CMH}/:${PROXY_PORT_IAD}`
+    : cmhReady
+      ? `proxy ready on :${PROXY_PORT_CMH} (IAD unavailable)`
+      : `proxy ready on :${PROXY_PORT_IAD} (CMH unavailable)`;
+
+  console.log(`[bedrock-mantle] ${proxyStatus} — signing with ${profileLabel}`);
+
+  // Register immediately from cache/fallback. Live model discovery runs in the
+  // background and re-registers the provider when it completes so extension
+  // startup does not block pi's time-to-first-token.
+  registerBedrockMantleProvider(pi, fastModels());
+
+  void (async () => {
+    try {
+      const models = await discoverModels();
+      registerBedrockMantleProvider(pi, models);
+      try {
+        writeCachedModels(models);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[bedrock-mantle] Live model cache write failed (${msg})`);
+      }
+      console.log(`[bedrock-mantle] refreshed ${models.length} models from live discovery`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[bedrock-mantle] Background model discovery failed (${msg}) — using cached/fallback model list.`
+      );
+    }
+  })();
 }

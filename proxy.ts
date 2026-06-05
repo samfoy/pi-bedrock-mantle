@@ -43,7 +43,7 @@ const DROP_REQUEST = new Set([
 ]);
 
 // Headers that must not be forwarded back to the caller.
-const DROP_RESPONSE = new Set(["content-encoding", "transfer-encoding", "connection"]);
+const DROP_RESPONSE = new Set(["content-encoding", "content-length", "transfer-encoding", "connection"]);
 
 /**
  * Build a fresh SignatureV4 signer that reads credentials from the current
@@ -65,6 +65,25 @@ function makeSigner(region: string): SignatureV4 {
     service: "bedrock",
     region,
     sha256: Sha256,
+  });
+}
+
+function waitForDrainOrClose(res: ServerResponse): Promise<boolean> {
+  if (res.destroyed) return Promise.resolve(false);
+
+  return new Promise((resolve) => {
+    const cleanup = () => {
+      res.off("drain", onDrain);
+      res.off("close", onClose);
+      res.off("error", onError);
+    };
+    const onDrain = () => { cleanup(); resolve(!res.destroyed); };
+    const onClose = () => { cleanup(); resolve(false); };
+    const onError = () => { cleanup(); resolve(false); };
+
+    res.once("drain", onDrain);
+    res.once("close", onClose);
+    res.once("error", onError);
   });
 }
 
@@ -121,17 +140,31 @@ function makeHandler(region: string) {
       for (const [k, v] of upstream.headers.entries()) {
         if (!DROP_RESPONSE.has(k.toLowerCase())) responseHeaders[k] = v;
       }
+      if (upstream.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) {
+        responseHeaders["cache-control"] = "no-cache, no-transform";
+        responseHeaders["x-accel-buffering"] = "no";
+      }
       res.writeHead(upstream.status, responseHeaders);
+      res.flushHeaders();
 
       if (upstream.body) {
         const reader = upstream.body.getReader();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          res.write(Buffer.from(value));
+        const cancelReader = () => { void reader.cancel().catch(() => {}); };
+        res.once("close", cancelReader);
+        res.once("error", cancelReader);
+        try {
+          while (!res.destroyed) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!res.write(Buffer.from(value)) && !(await waitForDrainOrClose(res))) break;
+          }
+        } finally {
+          res.off("close", cancelReader);
+          res.off("error", cancelReader);
+          if (res.destroyed) await reader.cancel().catch(() => {});
         }
       }
-      res.end();
+      if (!res.destroyed) res.end();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (!res.headersSent) res.writeHead(500, { "content-type": "application/json" });
@@ -148,6 +181,7 @@ export function startProxy(port: number, region: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const handler = makeHandler(region);
     const server = createServer((req, res) => { void handler(req, res); });
+    server.on("connection", (socket) => socket.setNoDelay(true));
     server.unref();
     server.listen(port, "127.0.0.1", () => resolve());
     server.on("error", reject);
