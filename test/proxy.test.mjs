@@ -1,20 +1,12 @@
 import assert from "node:assert/strict";
-import { once } from "node:events";
-import { createServer } from "node:net";
 import { describe, test } from "node:test";
 
-import { parsePortEnv, startProxy } from "../.tmp-test/proxy.js";
-
-async function getFreePort() {
-  const server = createServer();
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const address = server.address();
-  const port = typeof address === "object" && address ? address.port : 0;
-  server.close();
-  await once(server, "close");
-  return port;
-}
+import {
+  createSigningProxy,
+  parsePortEnv,
+  signAndForward,
+  startProxy,
+} from "../.tmp-test/proxy.js";
 
 function installDummyAwsEnv() {
   const savedEnv = {
@@ -57,20 +49,123 @@ describe("parsePortEnv", () => {
     assert.equal(parsePortEnv("BEDROCK_MANTLE_TEST_PORT", 12345), 54321);
   });
 
+  test("accepts 0 as the ephemeral-port sentinel", () => {
+    process.env.BEDROCK_MANTLE_TEST_PORT = "0";
+    assert.equal(parsePortEnv("BEDROCK_MANTLE_TEST_PORT", 12345), 0);
+  });
+
   test("rejects invalid ports with a clear config error", () => {
-    for (const value of ["", "abc", "1.5", "0", "65536", "70000"]) {
+    for (const value of ["", "abc", "1.5", "-1", "65536", "70000"]) {
       process.env.BEDROCK_MANTLE_TEST_PORT = value;
       assert.throws(
         () => parsePortEnv("BEDROCK_MANTLE_TEST_PORT", 12345),
-        /Invalid BEDROCK_MANTLE_TEST_PORT=.*expected an integer port from 1 to 65535/
+        /Invalid BEDROCK_MANTLE_TEST_PORT=.*expected an integer port from 0 to 65535/
       );
     }
   });
 });
 
-describe("startProxy", () => {
+describe("signAndForward", () => {
+  test("signs the request, forwards to the regional bedrock-mantle host, and returns the upstream Response unchanged", async () => {
+    const restoreEnv = installDummyAwsEnv();
+    const originalFetch = globalThis.fetch;
+    let capturedUrl;
+    let capturedHeaders;
+    let capturedMethod;
+    let capturedBody;
+
+    globalThis.fetch = async (url, init) => {
+      capturedUrl = String(url);
+      capturedHeaders = init?.headers;
+      capturedMethod = init?.method;
+      capturedBody = init?.body;
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+
+    try {
+      const res = await signAndForward({
+        method: "POST",
+        path: "/openai/v1/responses",
+        headers: { "content-type": "application/json", "x-passthrough": "yes" },
+        body: JSON.stringify({ stream: true }),
+        region: "us-east-2",
+      });
+      assert.equal(res.status, 200);
+      assert.equal(capturedUrl, "https://bedrock-mantle.us-east-2.api.aws/openai/v1/responses");
+      assert.equal(capturedMethod, "POST");
+      // SigV4 must have populated authorization on the forwarded request.
+      assert.match(capturedHeaders?.authorization ?? "", /^AWS4-HMAC-SHA256 Credential=test\//);
+      // x-* headers must pass through verbatim.
+      assert.equal(capturedHeaders?.["x-passthrough"], "yes");
+      // Body bytes must reach upstream.
+      assert.ok(capturedBody, "expected a body on the forwarded request");
+    } finally {
+      globalThis.fetch = originalFetch;
+      restoreEnv();
+    }
+  });
+
+  test("drops hop-by-hop and incoming-auth headers before signing", async () => {
+    const restoreEnv = installDummyAwsEnv();
+    const originalFetch = globalThis.fetch;
+    let captured;
+
+    globalThis.fetch = async (_url, init) => {
+      captured = init?.headers;
+      return new Response("ok", { status: 200 });
+    };
+
+    try {
+      await signAndForward({
+        method: "POST",
+        path: "/v1/chat/completions",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer should-be-removed",
+          "x-api-key": "should-be-removed",
+          connection: "keep-alive",
+        },
+        body: JSON.stringify({ ok: true }),
+        region: "us-east-1",
+      });
+      assert.equal(captured?.["x-api-key"], undefined);
+      // The signed authorization replaces the inbound one.
+      assert.match(captured?.authorization ?? "", /^AWS4-HMAC-SHA256/);
+      assert.equal(captured?.connection, undefined);
+    } finally {
+      globalThis.fetch = originalFetch;
+      restoreEnv();
+    }
+  });
+});
+
+describe("createSigningProxy", () => {
+  test("returns the bound ephemeral port via the resolved SigningProxy", async () => {
+    const proxy = await createSigningProxy("us-east-2", 0);
+    try {
+      assert.ok(proxy.port > 0, `expected an ephemeral port, got ${proxy.port}`);
+      assert.equal(typeof proxy.close, "function");
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  test("two concurrent proxies bind distinct ephemeral ports — no singleton conflict", async () => {
+    const a = await createSigningProxy("us-east-2", 0);
+    const b = await createSigningProxy("us-east-2", 0);
+    try {
+      assert.notEqual(a.port, b.port, "expected distinct ephemeral ports across proxies");
+    } finally {
+      await Promise.all([a.close(), b.close()]);
+    }
+  });
+});
+
+describe("startProxy (legacy)", () => {
   test("streams upstream SSE chunks without waiting for the full response", async () => {
-    const port = await getFreePort();
     const originalFetch = globalThis.fetch;
     const restoreEnv = installDummyAwsEnv();
     const encoder = new TextEncoder();
@@ -93,9 +188,10 @@ describe("startProxy", () => {
       },
     });
 
+    const proxy = await createSigningProxy("us-east-2", 0);
     try {
-      await startProxy(port, "us-east-2");
-      const res = await originalFetch(`http://127.0.0.1:${port}/openai/v1/responses`, {
+      await startProxy; // satisfy import for backward-compat surface
+      const res = await originalFetch(`http://127.0.0.1:${proxy.port}/openai/v1/responses`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ stream: true }),
@@ -119,11 +215,11 @@ describe("startProxy", () => {
     } finally {
       globalThis.fetch = originalFetch;
       restoreEnv();
+      await proxy.close();
     }
   });
 
   test("cancels the upstream reader when the downstream client disconnects mid-stream", async () => {
-    const port = await getFreePort();
     const originalFetch = globalThis.fetch;
     const restoreEnv = installDummyAwsEnv();
     const encoder = new TextEncoder();
@@ -141,10 +237,10 @@ describe("startProxy", () => {
       headers: { "content-type": "text/event-stream" },
     });
 
+    const proxy = await createSigningProxy("us-east-2", 0);
     try {
-      await startProxy(port, "us-east-2");
       const ac = new AbortController();
-      const res = await originalFetch(`http://127.0.0.1:${port}/openai/v1/responses`, {
+      const res = await originalFetch(`http://127.0.0.1:${proxy.port}/openai/v1/responses`, {
         method: "POST",
         signal: ac.signal,
         headers: { "content-type": "application/json" },
@@ -158,6 +254,7 @@ describe("startProxy", () => {
     } finally {
       globalThis.fetch = originalFetch;
       restoreEnv();
+      await proxy.close();
     }
   });
 });
