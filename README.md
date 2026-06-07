@@ -25,16 +25,39 @@ Falls back to a curated static list if discovery fails (expired creds at startup
 
 ## How it works
 
-1. At startup, fetches the live model list from both `bedrock-mantle.us-east-1.api.aws/v1/models` and `bedrock-mantle.us-east-2.api.aws/v1/models` using SigV4, then merges the regional results.
-2. Starts lightweight regional HTTP proxies on `localhost:57893` (us-east-2/CMH) and `localhost:57891` (us-east-1/IAD).
-3. Pi sends inference requests to the regional proxy using the API driver selected per model:
+1. At startup, the extension binds two **per-process loopback proxies on ephemeral ports** (one for each region: us-east-2/CMH, us-east-1/IAD). Each pi process owns its own proxies — no singleton state shared across processes, no port conflicts, no stale credentials surviving across long-lived consumers.
+2. The proxies sign every inbound request with SigV4 (using `BEDROCK_MANTLE_AWS_PROFILE` if set, else the default credential chain) and forward it to `bedrock-mantle.us-east-{1,2}.api.aws`.
+3. Live model discovery runs in the background — `/v1/models` queried in both regions, results merged. While discovery runs, pi uses a cached or curated fallback list so startup never blocks.
+4. Pi routes each model to the right driver based on the model id:
    - Anthropic Claude → `anthropic-messages` via `/anthropic/v1/messages`
    - GPT-5.x → `openai-responses` via `/openai/v1/responses`
    - GPT OSS and other OpenAI-compatible models → `openai-completions` via `/v1/chat/completions`
-4. The proxy SigV4-signs each request (via `fromNodeProviderChain` — picks up ada/env/config creds automatically) and forwards it to the matching Bedrock Mantle regional endpoint.
 5. Streaming SSE responses are piped back to pi unchanged.
 
-If multiple pi sessions are running, the first one starts the proxy; subsequent ones reuse it.
+## In-process API
+
+When you don't need the HTTP indirection (e.g. building a tool that uses bedrock-mantle directly without pi), the package exports the signing core:
+
+```ts
+import { signAndForward, createSigningProxy } from "pi-bedrock-mantle";
+
+// Direct: sign + forward + return the upstream Response, no HTTP layer.
+const res = await signAndForward({
+  method: "POST",
+  path: "/openai/v1/responses",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ model: "openai.gpt-5.5", input: "hello" }),
+  region: "us-east-2",
+});
+
+// Or stand up a SigV4 proxy for an external OpenAI-compatible client.
+const proxy = await createSigningProxy("us-east-2"); // ephemeral port
+const openaiBase = `http://127.0.0.1:${proxy.port}/openai/v1`;
+// ... point your client at openaiBase ...
+await proxy.close();
+```
+
+Credentials are resolved per request, so rotation (SSO refresh, role assumption) takes effect immediately without restarting the process.
 
 ## Setup
 
@@ -106,4 +129,4 @@ The extension and proxy first honor `BEDROCK_MANTLE_AWS_PROFILE` via `fromIni({ 
 
 **HTTP 403** — account not allowlisted for bedrock-mantle.
 
-**Proxy port conflict** — if something else is on port 57893 or 57891, set `BEDROCK_MANTLE_PROXY_PORT_CMH` or `BEDROCK_MANTLE_PROXY_PORT_IAD` to another valid port.
+**Proxy port conflict** — by default, each pi process binds its own ephemeral ports, so port conflicts are impossible. If you've explicitly pinned `BEDROCK_MANTLE_PROXY_PORT_CMH` or `BEDROCK_MANTLE_PROXY_PORT_IAD` to a fixed value (e.g. for an external consumer that needs a stable URL), and that port is taken, change the value or unset the env var to fall back to ephemeral.
