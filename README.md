@@ -154,3 +154,27 @@ Level is controlled by `BEDROCK_MANTLE_LOG`:
 Every proxied response carries an `x-bedrock-mantle-request-id` header that
 matches the `id=` field in the log line, so callers (pi, dashboards) can
 correlate a user-visible failure to the matching server log.
+
+### Empty-completion detection
+
+GPT-5.x via the OpenAI Responses API can occasionally return zero visible
+content after running tools — the model exhausts its output budget on hidden
+reasoning and emits `output_tokens: 0` with `stop_reason: "stop"`. To pi (and
+any agent loop) this looks like a clean "done" with nothing to render, and
+the slot exits silently mid-turn.
+
+The proxy detects this pattern on `/openai/v1/responses` SSE streams without
+modifying the response. When detected, it emits a warn-level log line
+correlated to the request id:
+
+```
+[bedrock-mantle] level=warn kind=empty_completion id=Az3kP9 region=us-east-2
+  model=openai.gpt-5.5 output_tokens=0 reasoning_tokens=850
+  output_item_types=reasoning stop_reason=completed
+  hint="model returned no message content after tool use; lower reasoning effort or raise max_output_tokens"
+```
+
+The upstream bytes are passed to the client unchanged — detection is
+observability only, never a transformation. Pi (or operators reading the
+log) can decide whether to retry, surface the error to the user, or adjust
+the reasoning-effort knob.
