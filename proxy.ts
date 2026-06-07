@@ -24,6 +24,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { Sha256 } from "@aws-crypto/sha256-js";
 import { fromIni, fromNodeProviderChain } from "@aws-sdk/credential-providers";
 import { SignatureV4 } from "@smithy/signature-v4";
+import { log, newRequestId } from "./log.js";
 
 // ─── Port parsing (kept for backward compat with pinned env overrides) ──────
 
@@ -202,11 +203,19 @@ function waitForDrainOrClose(res: ServerResponse): Promise<boolean> {
 
 function makeHandler(region: string) {
   return async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const reqId = newRequestId();
+    const startedAt = Date.now();
+    let bytesIn = 0;
+    let bytesOut = 0;
+    let upstreamStatus: number | undefined;
+    let upstreamRequestId: string | undefined;
+
     try {
       // 1. Collect body
       const chunks: Buffer[] = [];
       for await (const chunk of req) chunks.push(chunk as Buffer);
       const bodyBuf = Buffer.concat(chunks);
+      bytesIn = bodyBuf.length;
 
       // 2. Sign and forward via the in-process surface
       const upstream = await signAndForward({
@@ -216,6 +225,10 @@ function makeHandler(region: string) {
         body: bodyBuf,
         region,
       });
+      upstreamStatus = upstream.status;
+      upstreamRequestId = upstream.headers.get("x-amzn-requestid")
+        ?? upstream.headers.get("x-request-id")
+        ?? undefined;
 
       // 3. Stream response back
       const responseHeaders: Record<string, string> = {};
@@ -226,6 +239,8 @@ function makeHandler(region: string) {
         responseHeaders["cache-control"] = "no-cache, no-transform";
         responseHeaders["x-accel-buffering"] = "no";
       }
+      // Inject our request id so callers (pi, dashboards) can correlate logs.
+      responseHeaders["x-bedrock-mantle-request-id"] = reqId;
       res.writeHead(upstream.status, responseHeaders);
       res.flushHeaders();
 
@@ -238,6 +253,7 @@ function makeHandler(region: string) {
           while (!res.destroyed) {
             const { done, value } = await reader.read();
             if (done) break;
+            bytesOut += value.byteLength;
             if (!res.write(Buffer.from(value)) && !(await waitForDrainOrClose(res))) break;
           }
         } finally {
@@ -247,10 +263,47 @@ function makeHandler(region: string) {
         }
       }
       if (!res.destroyed) res.end();
+
+      // Per-request log line. `info` for non-2xx so operators see the failure
+      // pattern in the default log level; `debug` for the success path so we
+      // don't drown logs in noise.
+      const isError = upstream.status >= 400;
+      (isError ? log.warn : log.debug)("request", {
+        id: reqId,
+        region,
+        method: req.method,
+        path: req.url,
+        status: upstream.status,
+        latency_ms: Date.now() - startedAt,
+        bytes_in: bytesIn,
+        bytes_out: bytesOut,
+        upstream_request_id: upstreamRequestId,
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (!res.headersSent) res.writeHead(500, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: { message: `bedrock-mantle proxy (${region}): ${msg}`, type: "proxy_error" } }));
+      log.error("request_failed", {
+        id: reqId,
+        region,
+        method: req.method,
+        path: req.url,
+        latency_ms: Date.now() - startedAt,
+        bytes_in: bytesIn,
+        upstream_status: upstreamStatus,
+        error: err instanceof Error ? err : String(err),
+      });
+      if (!res.headersSent) {
+        res.writeHead(500, {
+          "content-type": "application/json",
+          "x-bedrock-mantle-request-id": reqId,
+        });
+      }
+      res.end(JSON.stringify({
+        error: {
+          message: `bedrock-mantle proxy (${region}): ${msg}`,
+          type: "proxy_error",
+          request_id: reqId,
+        },
+      }));
     }
   };
 }

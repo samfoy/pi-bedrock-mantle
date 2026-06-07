@@ -130,3 +130,27 @@ The extension and proxy first honor `BEDROCK_MANTLE_AWS_PROFILE` via `fromIni({ 
 **HTTP 403** — account not allowlisted for bedrock-mantle.
 
 **Proxy port conflict** — by default, each pi process binds its own ephemeral ports, so port conflicts are impossible. If you've explicitly pinned `BEDROCK_MANTLE_PROXY_PORT_CMH` or `BEDROCK_MANTLE_PROXY_PORT_IAD` to a fixed value (e.g. for an external consumer that needs a stable URL), and that port is taken, change the value or unset the env var to fall back to ephemeral.
+
+## Logging
+
+The extension logs to stderr with a leveled, key=value format:
+
+```
+[bedrock-mantle] level=info kind=ready cmh_port=54321 iad_port=54322 profile=openclaw-bedrock
+[bedrock-mantle] level=debug kind=request id=Az3kP9 region=us-east-2 method=POST path=/openai/v1/responses status=200 latency_ms=412 bytes_in=2851 bytes_out=18432
+[bedrock-mantle] level=warn kind=request id=Bx7mQ2 region=us-east-1 status=403 latency_ms=98
+```
+
+Level is controlled by `BEDROCK_MANTLE_LOG`:
+
+| Value | Behavior |
+|---|---|
+| `silent` / `off` / `none` | nothing |
+| `error` | upstream/network failures only |
+| `warn` | + non-2xx responses |
+| `info` *(default)* | + startup, model discovery |
+| `debug` | + per-request line for every call |
+
+Every proxied response carries an `x-bedrock-mantle-request-id` header that
+matches the `id=` field in the log line, so callers (pi, dashboards) can
+correlate a user-visible failure to the matching server log.

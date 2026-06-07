@@ -8,6 +8,7 @@ import {
   fetchModels,
   writeCachedModels,
 } from "../.tmp-test/models.js";
+import { setLogLevel } from "../.tmp-test/log.js";
 
 // Test ports — fixed so URL assertions are stable; nothing actually binds in
 // these unit tests since fetch is mocked or model construction is pure.
@@ -54,10 +55,14 @@ async function withMockedFetch(resolver, fn) {
 async function withMutedWarnings(fn) {
   const warn = console.warn;
   console.warn = () => {};
+  // Our logger bypasses console.warn (writes directly to process.stderr) so
+  // mute it explicitly too.
+  setLogLevel("silent");
   try {
     return await fn();
   } finally {
     console.warn = warn;
+    setLogLevel("info");
   }
 }
 
