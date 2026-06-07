@@ -25,6 +25,7 @@ import { Sha256 } from "@aws-crypto/sha256-js";
 import { fromIni, fromNodeProviderChain } from "@aws-sdk/credential-providers";
 import { SignatureV4 } from "@smithy/signature-v4";
 import { log, newRequestId } from "./log.js";
+import { maybeDetectEmptyCompletion } from "./empty-completion.js";
 
 // ─── Port parsing (kept for backward compat with pinned env overrides) ──────
 
@@ -218,13 +219,23 @@ function makeHandler(region: string) {
       bytesIn = bodyBuf.length;
 
       // 2. Sign and forward via the in-process surface
-      const upstream = await signAndForward({
+      const rawUpstream = await signAndForward({
         method: req.method ?? "POST",
         path: req.url ?? "/",
         headers: req.headers as Record<string, string | undefined>,
         body: bodyBuf,
         region,
       });
+      // 2a. Wrap with the empty-completion detector for openai-responses SSE.
+      // No-ops for any other path/content-type, so this is safe to apply
+      // unconditionally. dispose() must be called when the client stream
+      // tears down so the tee'd upstream sees a propagated cancel.
+      const detection = maybeDetectEmptyCompletion(rawUpstream, {
+        requestId: reqId,
+        region,
+        path: req.url ?? "/",
+      });
+      const upstream = detection.response;
       upstreamStatus = upstream.status;
       upstreamRequestId = upstream.headers.get("x-amzn-requestid")
         ?? upstream.headers.get("x-request-id")
@@ -246,7 +257,12 @@ function makeHandler(region: string) {
 
       if (upstream.body) {
         const reader = upstream.body.getReader();
-        const cancelReader = () => { void reader.cancel().catch(() => {}); };
+        const cancelReader = () => {
+          void reader.cancel().catch(() => {});
+          // Tear down the empty-completion scanner so the tee'd upstream
+          // can propagate cancel to the underlying source.
+          detection.dispose();
+        };
         res.once("close", cancelReader);
         res.once("error", cancelReader);
         try {
@@ -259,7 +275,10 @@ function makeHandler(region: string) {
         } finally {
           res.off("close", cancelReader);
           res.off("error", cancelReader);
-          if (res.destroyed) await reader.cancel().catch(() => {});
+          if (res.destroyed) {
+            await reader.cancel().catch(() => {});
+            detection.dispose();
+          }
         }
       }
       if (!res.destroyed) res.end();
