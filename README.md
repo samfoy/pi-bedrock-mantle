@@ -34,31 +34,6 @@ Falls back to a curated static list if discovery fails (expired creds at startup
    - GPT OSS and other OpenAI-compatible models → `openai-completions` via `/v1/chat/completions`
 5. Streaming SSE responses are piped back to pi unchanged.
 
-## In-process API
-
-When you don't need the HTTP indirection (e.g. building a tool that uses bedrock-mantle directly without pi), the package exports the signing core:
-
-```ts
-import { signAndForward, createSigningProxy } from "pi-bedrock-mantle";
-
-// Direct: sign + forward + return the upstream Response, no HTTP layer.
-const res = await signAndForward({
-  method: "POST",
-  path: "/openai/v1/responses",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify({ model: "openai.gpt-5.5", input: "hello" }),
-  region: "us-east-2",
-});
-
-// Or stand up a SigV4 proxy for an external OpenAI-compatible client.
-const proxy = await createSigningProxy("us-east-2"); // ephemeral port
-const openaiBase = `http://127.0.0.1:${proxy.port}/openai/v1`;
-// ... point your client at openaiBase ...
-await proxy.close();
-```
-
-Credentials are resolved per request, so rotation (SSO refresh, role assumption) takes effect immediately without restarting the process.
-
 ## Setup
 
 ### 1. Install
