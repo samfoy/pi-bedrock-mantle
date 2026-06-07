@@ -35,6 +35,7 @@ import {
   PROXY_PORT_IAD,
   type SigningProxy,
 } from "./proxy.js";
+import { log } from "./log.js";
 
 // Public re-exports for in-process callers.
 export {
@@ -69,10 +70,10 @@ async function startProxies(): Promise<ProxySetup> {
   // diagnose. Ephemeral binds can't fail on EADDRINUSE so this is purely for
   // operators who pinned a port.
   if (!cmh && cmhResult.status === "rejected") {
-    console.warn(`[bedrock-mantle] us-east-2 proxy failed to bind: ${describeErr(cmhResult.reason)}`);
+    log.warn("proxy_bind_failed", { region: "us-east-2", error: cmhResult.reason });
   }
   if (!iad && iadResult.status === "rejected") {
-    console.warn(`[bedrock-mantle] us-east-1 proxy failed to bind: ${describeErr(iadResult.reason)}`);
+    log.warn("proxy_bind_failed", { region: "us-east-1", error: iadResult.reason });
   }
 
   return {
@@ -86,14 +87,6 @@ async function startProxies(): Promise<ProxySetup> {
       iad: iad?.port ?? 0,
     },
   };
-}
-
-function describeErr(err: unknown): string {
-  if (err instanceof Error) {
-    const code = (err as NodeJS.ErrnoException).code;
-    return code ? `${code}: ${err.message}` : err.message;
-  }
-  return String(err);
 }
 
 function registerBedrockMantleProvider(pi: ExtensionAPI, models: PiModelConfig[], ports: ProxyPorts): void {
@@ -116,27 +109,21 @@ function registerBedrockMantleProvider(pi: ExtensionAPI, models: PiModelConfig[]
 }
 
 export default async function bedrockMantleExtension(pi: ExtensionAPI): Promise<void> {
-  // Credentials are resolved per-request in the proxy (not at startup), so
-  // BEDROCK_MANTLE_AWS_PROFILE takes effect on every call. We no longer
-  // clobber AWS_PROFILE globally.
   const profile = process.env.BEDROCK_MANTLE_AWS_PROFILE;
-  const profileLabel = profile ? `profile=${profile}` : "default credential chain";
 
   // Bind proxies first so the cache-derived baseUrls reference real ports.
   const setup = await startProxies();
 
   if (!setup.cmh && !setup.iad) {
-    console.error("[bedrock-mantle] Both proxies failed to bind — aborting registration.");
+    log.error("startup_failed", { reason: "both_proxies_failed" });
     return;
   }
 
-  const proxyStatus = setup.cmh && setup.iad
-    ? `proxies ready on :${setup.cmh.port}/:${setup.iad.port}`
-    : setup.cmh
-      ? `proxy ready on :${setup.cmh.port} (us-east-1 unavailable)`
-      : `proxy ready on :${setup.iad!.port} (us-east-2 unavailable)`;
-
-  console.log(`[bedrock-mantle] ${proxyStatus} — signing with ${profileLabel}`);
+  log.info("ready", {
+    cmh_port: setup.cmh?.port,
+    iad_port: setup.iad?.port,
+    profile: profile ?? "default-credential-chain",
+  });
 
   // Register from the cache/fallback synchronously so the model list is
   // available immediately. Live discovery runs in the background.
@@ -149,13 +136,11 @@ export default async function bedrockMantleExtension(pi: ExtensionAPI): Promise<
       try {
         writeCachedModels(models);
       } catch (err) {
-        console.warn(`[bedrock-mantle] Live model cache write failed (${describeErr(err)})`);
+        log.warn("cache_write_failed", { error: err });
       }
-      console.log(`[bedrock-mantle] refreshed ${models.length} models from live discovery`);
+      log.info("discovery_refreshed", { models: models.length });
     } catch (err) {
-      console.warn(
-        `[bedrock-mantle] Background model discovery failed (${describeErr(err)}) — using cached/fallback model list.`
-      );
+      log.warn("discovery_failed", { error: err, fallback: "cached_or_curated" });
     }
   })();
 }

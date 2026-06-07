@@ -30,6 +30,7 @@
     "index.ts",
     "proxy.ts",
     "models.ts",
+    "log.ts",
     "README.md",
     "LICENSE"
   ],

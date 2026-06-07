@@ -7,6 +7,21 @@ import {
   signAndForward,
   startProxy,
 } from "../.tmp-test/proxy.js";
+import { setLogLevel } from "../.tmp-test/log.js";
+
+function captureStderr(fn) {
+  const captured = [];
+  const original = process.stderr.write;
+  // @ts-ignore
+  process.stderr.write = (chunk) => {
+    captured.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf-8"));
+    return true;
+  };
+  return Promise.resolve(fn()).then(
+    (result) => { process.stderr.write = original; return { result, stderr: captured.join("") }; },
+    (err) => { process.stderr.write = original; throw err; },
+  );
+}
 
 function installDummyAwsEnv() {
   const savedEnv = {
@@ -160,6 +175,100 @@ describe("createSigningProxy", () => {
       assert.notEqual(a.port, b.port, "expected distinct ephemeral ports across proxies");
     } finally {
       await Promise.all([a.close(), b.close()]);
+    }
+  });
+});
+
+describe("proxy logging", () => {
+  test("emits a structured request line at debug level on success and surfaces the request id in response headers", async () => {
+    const restoreEnv = installDummyAwsEnv();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response("ok", {
+      status: 200,
+      headers: { "content-type": "application/json", "x-amzn-requestid": "upstream-abc-123" },
+    });
+
+    setLogLevel("debug");
+    const proxy = await createSigningProxy("us-east-2", 0);
+    try {
+      const { result, stderr } = await captureStderr(async () => {
+        return await originalFetch(`http://127.0.0.1:${proxy.port}/openai/v1/responses`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ok: true }),
+        });
+      });
+      const reqId = result.headers.get("x-bedrock-mantle-request-id");
+      assert.ok(reqId, "expected x-bedrock-mantle-request-id header on the response");
+      assert.match(stderr, /level=debug kind=request/);
+      assert.match(stderr, new RegExp(`id=${reqId}`));
+      assert.match(stderr, /status=200/);
+      assert.match(stderr, /region=us-east-2/);
+      assert.match(stderr, /latency_ms=\d+/);
+      assert.match(stderr, /upstream_request_id=upstream-abc-123/);
+    } finally {
+      globalThis.fetch = originalFetch;
+      restoreEnv();
+      setLogLevel("info");
+      await proxy.close();
+    }
+  });
+
+  test("emits a warn line for upstream non-2xx responses (visible at default info level)", async () => {
+    const restoreEnv = installDummyAwsEnv();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response('{"error":"forbidden"}', {
+      status: 403,
+      headers: { "content-type": "application/json" },
+    });
+
+    setLogLevel("info");
+    const proxy = await createSigningProxy("us-east-1", 0);
+    try {
+      const { result, stderr } = await captureStderr(async () =>
+        originalFetch(`http://127.0.0.1:${proxy.port}/anthropic/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        })
+      );
+      assert.equal(result.status, 403);
+      assert.match(stderr, /level=warn kind=request/);
+      assert.match(stderr, /status=403/);
+    } finally {
+      globalThis.fetch = originalFetch;
+      restoreEnv();
+      await proxy.close();
+    }
+  });
+
+  test("emits an error line and a structured 500 body when the upstream fetch throws", async () => {
+    const restoreEnv = installDummyAwsEnv();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => { throw new Error("network down"); };
+
+    setLogLevel("error");
+    const proxy = await createSigningProxy("us-east-2", 0);
+    try {
+      const { result, stderr } = await captureStderr(async () =>
+        originalFetch(`http://127.0.0.1:${proxy.port}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        })
+      );
+      assert.equal(result.status, 500);
+      const body = await result.json();
+      assert.equal(body.error.type, "proxy_error");
+      assert.ok(typeof body.error.request_id === "string" && body.error.request_id.length > 0);
+      assert.equal(result.headers.get("x-bedrock-mantle-request-id"), body.error.request_id);
+      assert.match(stderr, /level=error kind=request_failed/);
+      assert.match(stderr, /error="network down"/);
+    } finally {
+      globalThis.fetch = originalFetch;
+      restoreEnv();
+      setLogLevel("info");
+      await proxy.close();
     }
   });
 });

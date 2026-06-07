@@ -27,6 +27,7 @@ import { dirname, join } from "node:path";
 import { Sha256 } from "@aws-crypto/sha256-js";
 import { fromIni, fromNodeProviderChain } from "@aws-sdk/credential-providers";
 import { SignatureV4 } from "@smithy/signature-v4";
+import { log } from "./log.js";
 
 /**
  * Bound proxy ports for the two regions. Used both to construct per-model
@@ -421,11 +422,11 @@ export async function fetchModels(ports: ProxyPorts): Promise<PiModelConfig[]> {
     writeCachedModels(models);
     return models;
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(
-      `[bedrock-mantle] Model discovery failed (${msg}) — using fallback list. ` +
-      `Run 'ada credentials update' and restart pi to get the live list.`
-    );
+    log.warn("discovery_failed", {
+      error: err,
+      fallback: "curated_static_list",
+      hint: "refresh credentials and restart pi for the live model list",
+    });
     return applyPorts(FALLBACK_MODELS_RAW, ports);
   }
 }
