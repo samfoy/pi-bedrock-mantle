@@ -15,10 +15,6 @@
  * openai-responses driver, and GPT OSS / other OpenAI-compatible models use
  * openai-completions. Per-model baseUrl overrides route each model to the
  * right proxy automatically.
- *
- * In-process surface: callers that want to use bedrock-mantle without the
- * HTTP indirection can `import { signAndForward, createSigningProxy } from
- * "pi-bedrock-mantle"`. See proxy.ts for the API.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -36,14 +32,6 @@ import {
   type SigningProxy,
 } from "./proxy.js";
 import { log } from "./log.js";
-
-// Public re-exports for in-process callers.
-export {
-  signAndForward,
-  createSigningProxy,
-  type SigningProxy,
-  type SignAndForwardInput,
-} from "./proxy.js";
 
 interface ProxySetup {
   cmh: SigningProxy | null;
