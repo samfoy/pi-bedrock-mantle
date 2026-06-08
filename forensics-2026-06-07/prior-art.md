@@ -135,8 +135,14 @@ mode that's stochastic, while others describe more deterministic shapes.
    `badf178`.** Empirically takes us from ~10% to ~1% on gpt-5.5.
 
 5. **Switch endpoints from Responses to Chat Completions.** Forum #1365210
-   notes that Chat Completions works where Responses fails. Not viable for
-   pi which uses Responses for gpt-5.x specifically.
+   notes that Chat Completions works where Responses fails on first-party
+   OpenAI. **This escape hatch does not exist on Bedrock Mantle.** Probed
+   2026-06-07: `openai.gpt-5.5` and `openai.gpt-5.4` both reject
+   `/v1/chat/completions` with HTTP 400 `validation_error: "The model 'openai.gpt-5.x'
+   does not support the '/v1/chat/completions' API"`. AWS gates the entire
+   gpt-5.x family to the Responses API. Other models (gpt-oss-*, DeepSeek,
+   Qwen, etc.) accept chat-completions normally; this restriction is
+   gpt-5.x-specific. Not viable for pi which is already using Responses.
 
 6. **GPT-5.1 reportedly fixed some of these.** Per OpenAI forum
    ["Need reasoning: false option for GPT-5"](https://community.openai.com/t/need-reasoning-false-option-for-gpt-5-update-gpt-5-1-solves-reasoning-issue/1351588),
