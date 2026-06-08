@@ -217,3 +217,45 @@ no code) as retryable — re-issues the identical request once. Client-side
 failures (e.g. `invalid_request_error`) pass through without a wasted retry.
 Logged as `kind=upstream_failed_retry`. This is distinct from, and in addition
 to, the empty-completion retry.
+
+## Root cause isolated: gpt-5.5 errors when it emits a function_call (2026-06-08)
+
+Variant sweep (`scripts-bm-55-diagnose.mjs`, 6 samples each, us-east-2,
+minimal hand-crafted requests — no pi involved) pins the trigger precisely:
+
+| Variant | Result |
+|---|---|
+| 5.5 + tools, model **calls the tool** | 6/6 `server_error` |
+| 5.5 + tools, model **answers in text** | 6/6 ok |
+| 5.5 **no tools** | 6/6 ok |
+| 5.5 reason=low / high / none | 6/6 fail (effort irrelevant) |
+| 5.5 reason=minimal | HTTP 400 (param unsupported on this model) |
+| 5.5 **non-stream** | 6/6 **HTTP 500** (same failure, different surface) |
+| 5.5 max_output_tokens=4096 | 6/6 fail (not a budget issue) |
+| 5.5 dated snapshot `2026-04-23` | 6/6 fail (not snapshot-specific) |
+| **5.4 + tools, calls tool** | 6/6 ok |
+
+**The trigger is producing a `function_call` output — nothing else.** Tools in
+the request are fine; a text answer is fine; no tools is fine. The moment
+gpt-5.5 generates a tool call, the request fails.
+
+**Where it breaks:** the dumps show every `function_call_arguments.delta`
+streams through and the call is fully built (`...done`, complete args), *then*
+`response.failed`. So generation succeeds and **finalization fails** — the
+server errors at the step that serializes the completed function_call and emits
+`response.completed`. Streaming surfaces it as a `response.failed` SSE event;
+non-streaming as an HTTP 500. **gpt-5.4 does the identical tool call 6/6.**
+
+Conclusion: a **server-side defect in gpt-5.5's tool-call finalization path on
+Bedrock (us-east-2)** — gpt-5.5-specific, deterministic on tool calls,
+independent of effort / token budget / stream mode / snapshot. Not fixable in
+the proxy or pi (the model produces a correct tool call; Bedrock can't finalize
+it). Rate varies over time (intermittent AM, 100% by 21:43); the trigger is
+always a function_call.
+
+**Region availability** (`scripts-bm-region-probe.mjs`, 16 regions): gpt-5.5
+exists **only in us-east-2** (no failover region). gpt-5.4 is in us-east-2 +
+us-west-2 (both healthy on tool calls). No gpt-5.x anywhere else.
+
+**Mitigation:** use gpt-5.4 for tool-using flows; gpt-5.5 is text-only-usable
+right now. Minimal 100% repro lives in `scripts-bm-55-diagnose.mjs`.
