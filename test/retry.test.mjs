@@ -427,6 +427,31 @@ describe("transient response.failed retry", () => {
     setLogLevel("info");
   });
 
+  test("both attempts failed: dumps the failing request + response when EMPTY_DUMP_DIR set", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "bm-dump-"));
+    const saved = process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR;
+    process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR = dir;
+    try {
+      setRetryMode(true);
+      setLogLevel("silent");
+      await withMockedFetch(
+        [() => sseResponse(failedEvents()), () => sseResponse(failedEvents())],
+        () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+      );
+      const files = readdirSync(dir).filter((f) => f.startsWith("failed_retried-"));
+      assert.equal(files.length, 1, "expected one failed_retried dump");
+      const dump = JSON.parse(readFileSync(join(dir, files[0]), "utf-8"));
+      assert.deepEqual(dump.request, { model: "openai.gpt-5.5", input: [] });
+      assert.match(dump.responseText, /response\.failed/);
+    } finally {
+      if (saved === undefined) delete process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR;
+      else process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR = saved;
+      rmSync(dir, { recursive: true, force: true });
+      setRetryMode(undefined);
+      setLogLevel("info");
+    }
+  });
+
   test("non-transient failure (invalid_request_error): NOT retried, passes through", async () => {
     setRetryMode(true);
     setLogLevel("silent");
