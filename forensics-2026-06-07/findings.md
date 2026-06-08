@@ -155,3 +155,30 @@ Bottom line: there's no clever request-shape fix. Mitigation #2
 - `scripts-bm-direct.mjs` — sign + POST a hand-crafted body, no pi
 - `scripts-bm-replay.mjs` — replay a captured request N times
 - `scripts-bm-variants.mjs` — sweep model/effort variants of a captured request
+
+## Followup: second empty variant — reasoning-burn with output_tokens > 0 (2026-06-08)
+
+Confirmed live in session `019ea873` (Rosie workspace, gpt-5.5 on
+openai-responses): gpt-5.5 made a tool call at 18:17:20, then the next turn
+went idle (no message, no tool call). Sam manually swapped to
+claude-opus-4-8 at 18:17:44 and re-prompted; Claude ran clean to completion.
+
+**The first detector missed it.** The original verdict gated `empty` on
+`usage.output_tokens === 0`. This variant burns reasoning tokens
+(`output_tokens > 0`) while emitting zero *actionable* output items, so the
+token gate said "not empty" and neither the passive detector nor the retry
+fired — no `empty_completion` / `empty_completion_retry` line in the file
+sink, despite the turn being dead to the agent loop.
+
+Fix (commit `996dd16`): redefine empty as **status completed/absent AND no
+message-with-visible-text (output_text/text/refusal) AND no tool call (any
+`*_call` item, plus `mcp_approval_request`)** — token count dropped from the
+test. With retry on by default, the idle variant now auto-retries instead of
+dead-ending. `status="incomplete"` reasoning exhaustion (max_output_tokens)
+is intentionally excluded — that's a budget signal, not the stochastic bug.
+
+Note: we fixed this from the symptom + timeline, not a captured payload. To
+confirm the exact shape (and rule out a "stream ends with no
+response.completed" third variant — now logged at debug as
+`empty_completion_no_terminal`), set `BEDROCK_MANTLE_EMPTY_DUMP_DIR` and
+`BEDROCK_MANTLE_LOG=debug` and keep using gpt-5.5 until it idles again.
