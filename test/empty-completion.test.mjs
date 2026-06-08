@@ -56,6 +56,73 @@ describe("inspectResponseCompleted", () => {
     assert.deepEqual(verdict.outputItemTypes, ["reasoning", "message"]);
   });
 
+  test("flags empty when output has only reasoning items even though output_tokens > 0 (idle variant)", () => {
+    // gpt-5.5 idle variant: it spends tokens reasoning but emits no message
+    // and no tool call. output_tokens > 0 here, which the old token-gated
+    // check let slip through.
+    const verdict = inspectResponseCompleted({
+      response: {
+        model: "openai.gpt-5.5",
+        status: "completed",
+        output: [{ type: "reasoning", summary: [] }],
+        usage: { output_tokens: 312, output_tokens_details: { reasoning_tokens: 312 } },
+      },
+    });
+    assert.equal(verdict.empty, true);
+    assert.equal(verdict.outputTokens, 312);
+  });
+
+  test("does NOT flag a reasoning + function_call turn (tool call is actionable, even with no message)", () => {
+    // The canonical gpt-5.5 *success* shape from the forensics: reasoning then
+    // a function_call, no message text. Must never be treated as empty.
+    const verdict = inspectResponseCompleted({
+      response: {
+        status: "completed",
+        output: [
+          { type: "reasoning" },
+          { type: "function_call", name: "do_thing", arguments: "{}" },
+        ],
+        usage: { output_tokens: 50 },
+      },
+    });
+    assert.equal(verdict.empty, false);
+    assert.deepEqual(verdict.outputItemTypes, ["reasoning", "function_call"]);
+  });
+
+  test("does NOT flag other *_call output items (custom_tool_call, web_search_call)", () => {
+    for (const callType of ["custom_tool_call", "web_search_call", "computer_call", "mcp_call"]) {
+      const verdict = inspectResponseCompleted({
+        response: { status: "completed", output: [{ type: callType }], usage: { output_tokens: 0 } },
+      });
+      assert.equal(verdict.empty, false, `${callType} should be actionable, not empty`);
+    }
+  });
+
+  test("does NOT flag a refusal-only message (refusal is legitimate visible output)", () => {
+    const verdict = inspectResponseCompleted({
+      response: {
+        status: "completed",
+        output: [
+          { type: "reasoning" },
+          { type: "message", content: [{ type: "refusal", refusal: "I can't help with that." }] },
+        ],
+        usage: { output_tokens: 8 },
+      },
+    });
+    assert.equal(verdict.empty, false);
+  });
+
+  test("does NOT flag an mcp_approval_request turn (agent must act on it)", () => {
+    const verdict = inspectResponseCompleted({
+      response: {
+        status: "completed",
+        output: [{ type: "mcp_approval_request", id: "appr_1" }],
+        usage: { output_tokens: 0 },
+      },
+    });
+    assert.equal(verdict.empty, false);
+  });
+
   test("does NOT flag when status is partial / cancelled (legitimate mid-stream end)", () => {
     const verdict = inspectResponseCompleted({
       response: {

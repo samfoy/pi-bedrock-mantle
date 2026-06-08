@@ -263,10 +263,13 @@ export interface EmptyCompletionVerdict {
  * Inspect a parsed `response.completed` event payload and decide whether it
  * fits the empty-completion failure pattern.
  *
- * Pattern:
- *   - The response's `output` array is missing OR contains zero items of
- *     type `message` with non-empty text content.
- *   - `usage.output_tokens` is 0 (or absent).
+ * Pattern ("empty to the agent"):
+ *   - status is `completed` (or absent), AND
+ *   - the `output` array contains no `message` item with non-empty text, AND
+ *   - it contains no tool/function call item (any `*_call` type).
+ *
+ * Token count is NOT part of the test: a turn that burns reasoning tokens but
+ * emits zero actionable items is still empty from the agent's perspective.
  */
 export function inspectResponseCompleted(payload: unknown): EmptyCompletionVerdict {
   const verdict: EmptyCompletionVerdict = { empty: false, outputItemTypes: [] };
@@ -290,6 +293,7 @@ export function inspectResponseCompleted(payload: unknown): EmptyCompletionVerdi
 
   const output = response.output;
   let hasVisibleText = false;
+  let hasToolCall = false;
   if (Array.isArray(output)) {
     for (const item of output) {
       if (!item || typeof item !== "object") continue;
@@ -299,16 +303,31 @@ export function inspectResponseCompleted(payload: unknown): EmptyCompletionVerdi
       if (type === "message" && hasNonEmptyTextContent(it.content)) {
         hasVisibleText = true;
       }
+      // Any tool/function call item is actionable output. In the Responses
+      // API these all end in `_call` (function_call, custom_tool_call,
+      // computer_call, file_search_call, web_search_call, mcp_call, …), so
+      // a suffix test is forward-compatible with new call types.
+      // `mcp_approval_request` is also actionable (the agent must approve)
+      // but doesn't end in `_call`, so it's matched explicitly.
+      if (type.endsWith("_call") || type === "mcp_approval_request") {
+        hasToolCall = true;
+      }
     }
   }
 
-  // The empty-completion pattern: zero visible text AND zero output tokens
-  // (or no usage block — gpt-5.5 in some failure modes omits usage). The
-  // status check guards against partial / cancelled runs that legitimately
-  // ended mid-stream.
-  const tokensZero = verdict.outputTokens === 0 || verdict.outputTokens === undefined;
+  // "Empty to the agent" = the turn produced nothing actionable: no visible
+  // message text AND no tool/function call. We deliberately do NOT gate on
+  // output_tokens — gpt-5.5 has an idle variant that burns reasoning tokens
+  // (output_tokens > 0) but emits zero actionable items, which a token-gated
+  // check misses entirely (it leaves the agent loop with nothing to do, so
+  // pi silently ends the turn). The status guard still excludes partial /
+  // cancelled runs that legitimately ended mid-stream.
+  //
+  // Out of scope by design: a reasoning-exhaustion turn that lands as
+  // status="incomplete" (e.g. max_output_tokens hit) is NOT flagged here —
+  // that's a budget signal, not the stochastic gpt-5.5 idle bug.
   const completed = verdict.status === undefined || verdict.status === "completed";
-  verdict.empty = !hasVisibleText && tokensZero && completed;
+  verdict.empty = !hasVisibleText && !hasToolCall && completed;
   return verdict;
 }
 
@@ -318,6 +337,13 @@ function hasNonEmptyTextContent(content: unknown): boolean {
     if (!block || typeof block !== "object") continue;
     const b = block as Record<string, unknown>;
     if ((b.type === "output_text" || b.type === "text") && typeof b.text === "string" && b.text.length > 0) {
+      return true;
+    }
+    // A refusal is legitimate, visible model output — not an empty completion.
+    // Without this a refusal-only message (no text, no tool call) would be
+    // flagged empty and trigger a guaranteed-wasteful retry (refusals are
+    // sticky, so the retry refuses again).
+    if (b.type === "refusal" && typeof b.refusal === "string" && b.refusal.length > 0) {
       return true;
     }
   }
