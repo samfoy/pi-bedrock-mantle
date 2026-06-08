@@ -23,9 +23,19 @@
  * streamed. For tool-call-only first turns this is ~free (the response is
  * a single function_call and small). For long visible-text responses it
  * adds latency equal to the full response time. Acceptable for agent
- * flows; ship behind an env flag so streaming-sensitive consumers opt in.
+ * flows.
  *
- * Enable with: BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY=1
+ * Scope: buffer-and-retry engages by default for ALL `/openai/v1/responses`
+ * traffic (the gpt-5.x family is where the empty-completion bug is measured;
+ * see `forensics-2026-06-07/findings.md`, but applying it everywhere on the
+ * responses path is harmless — non-empty responses pass through after a
+ * single attempt).
+ *
+ * Override with the env flag:
+ *   - BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY=0  → force retry OFF (use for
+ *     streaming-sensitive flows that accept the empty rate).
+ *   - BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY=1  → explicitly force retry ON.
+ *   - unset (default)                          → retry ON.
  */
 
 import { inspectResponseCompleted, type EmptyCompletionVerdict } from "./empty-completion.js";
@@ -51,12 +61,34 @@ export function setRetryMode(enabled: boolean | undefined): void {
   retryOverride = enabled;
 }
 
+/**
+ * Parse the env override into a tri-state:
+ *   true  → force on
+ *   false → force off
+ *   undefined → no explicit override (fall back to default: on)
+ */
+function envRetryOverride(): boolean | undefined {
+  const raw = process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
+  if (raw === undefined || raw === "") return undefined;
+  const lower = raw.toLowerCase();
+  if (lower === "1" || lower === "true" || lower === "yes" || lower === "on") return true;
+  if (lower === "0" || lower === "false" || lower === "no" || lower === "off") return false;
+  return undefined;
+}
+
+/**
+ * Decide whether buffer-and-retry should engage for openai-responses traffic.
+ *
+ * Precedence:
+ *   1. setRetryMode() test/operator hook (wins outright)
+ *   2. BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY env override (on/off)
+ *   3. default: on
+ */
 function retryEnabled(): boolean {
   if (retryOverride !== undefined) return retryOverride;
-  const raw = process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
-  if (!raw) return false;
-  const lower = raw.toLowerCase();
-  return lower === "1" || lower === "true" || lower === "yes" || lower === "on";
+  const env = envRetryOverride();
+  if (env !== undefined) return env;
+  return true;
 }
 
 function isOpenAIResponsesPath(path: string): boolean {

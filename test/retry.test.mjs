@@ -219,10 +219,12 @@ describe("fetchWithEmptyRetry — retry mode ON", () => {
 });
 
 describe("retry mode env parsing", () => {
-  test("env values 1 / true / yes / on enable retry; everything else disables", async () => {
+  test("env override is tri-state: on / off / default-on", async () => {
     const saved = process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
     setRetryMode(undefined); // clear test override so env is consulted
+    setLogLevel("silent");
 
+    // Default (unset/empty) is ON; explicit 0/false/off forces OFF.
     const cases = [
       ["1", true],
       ["true", true],
@@ -231,8 +233,9 @@ describe("retry mode env parsing", () => {
       ["on", true],
       ["0", false],
       ["false", false],
-      ["", false],
-      [undefined, false],
+      ["off", false],
+      ["", true],        // empty → no override → default on
+      [undefined, true], // unset → default on
     ];
 
     for (const [val, expected] of cases) {
@@ -254,6 +257,30 @@ describe("retry mode env parsing", () => {
       assert.equal(callCount, expected ? 2 : 1);
     }
 
+    setLogLevel("info");
+    if (saved === undefined) delete process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
+    else process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY = saved;
+  });
+
+  test("retry is on by default regardless of model (gpt-5.4 retried too)", async () => {
+    const saved = process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
+    delete process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
+    setRetryMode(undefined);
+    setLogLevel("silent");
+    const gpt54Input = { ...SAMPLE_INPUT, body: '{"model":"openai.gpt-5.4","input":[]}' };
+    const gpt54Empty = [
+      'event: response.completed\ndata: {"response":{"model":"openai.gpt-5.4","status":"completed","output":[],"usage":{"output_tokens":0}}}\n\n',
+    ];
+    const { result, callCount } = await withMockedFetch(
+      [
+        () => sseResponse(gpt54Empty),
+        () => sseResponse(nonEmptyCompletionEvents()),
+      ],
+      () => fetchWithEmptyRetry(gpt54Input, SAMPLE_CTX),
+    );
+    assert.equal(result.attempts, 2, "default-on retry applies to all openai-responses models");
+    assert.equal(callCount, 2);
+    setLogLevel("info");
     if (saved === undefined) delete process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
     else process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY = saved;
   });

@@ -219,11 +219,11 @@ function makeHandler(region: string) {
       const bodyBuf = Buffer.concat(chunks);
       bytesIn = bodyBuf.length;
 
-      // 2. Sign and forward via the in-process surface, with optional
-      //    buffer-and-retry on empty completions (gate via
-      //    BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY=1). The retry layer is
-      //    a no-op pass-through for non-openai-responses paths and when
-      //    the env flag is unset.
+      // 2. Sign and forward via the in-process surface, with buffer-and-retry
+      //    on empty completions for the openai-responses path. On by default;
+      //    override globally with BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY
+      //    (0=force off, 1=force on). A no-op pass-through for
+      //    non-openai-responses paths.
       const { response: rawUpstream, attempts } = await fetchWithEmptyRetry(
         {
           method: req.method ?? "POST",

@@ -156,12 +156,23 @@ observability only, never a transformation. Pi (or operators reading the
 log) can decide whether to retry, surface the error to the user, or adjust
 the reasoning-effort knob.
 
-### Empty-completion retry (opt-in)
+### Empty-completion retry (on by default)
 
-Set `BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY=1` to make the proxy buffer
-`/openai/v1/responses` SSE responses end-to-end and retry once when the
-first attempt is empty. Empirically takes the user-visible empty rate from
-~10–20% to ~1–2%. One retry max — no infinite loop.
+The proxy buffers `/openai/v1/responses` SSE responses end-to-end and retries
+once when the first attempt is empty. Empirically takes the user-visible empty
+rate from ~10–20% to ~1–2%. One retry max — no infinite loop.
+
+**On by default for all openai-responses traffic.** Non-empty responses pass
+through after a single attempt, so the only cost on the happy path is
+end-to-end buffering of that one response.
+
+Override per deployment with `BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY`:
+
+| Value | Effect |
+|-------|--------|
+| unset (default) | retry **on** |
+| `1` / `true` / `on` | explicitly force retry **on** |
+| `0` / `false` / `off` | force retry **off** (live streaming, no buffering) |
 
 Log lines on retry:
 
@@ -171,9 +182,10 @@ Log lines on retry:
 [bedrock-mantle] level=warn kind=empty_completion_retry id=… attempt=2 outcome=still_empty   # rare
 ```
 
-Tradeoff: enabling retry buffers the entire SSE response in memory before
-forwarding to the client, so streaming "feels" like a single burst on
-`/openai/v1/responses` traffic. For tool-call-only first turns this is
-~free (responses are small, < 200KB); for long visible-text responses it
-adds latency equal to the full response time. Off by default; flip on
-when you're using gpt-5.x with tools and accept the latency tradeoff.
+Tradeoff: when retry engages it buffers the entire SSE response in memory
+before forwarding to the client, so streaming "feels" like a single burst on
+`/openai/v1/responses` traffic. For tool-call-only first turns this is ~free
+(responses are small, < 200KB); for long visible-text responses it adds
+latency equal to the full response time. Set the env flag to `0` if you have
+streaming-sensitive consumers that prefer live streaming over the empty-rate
+fix.

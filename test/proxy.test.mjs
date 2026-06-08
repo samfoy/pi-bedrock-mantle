@@ -277,6 +277,10 @@ describe("startProxy (legacy)", () => {
   test("streams upstream SSE chunks without waiting for the full response", async () => {
     const originalFetch = globalThis.fetch;
     const restoreEnv = installDummyAwsEnv();
+    // This test asserts raw incremental streaming on the openai-responses path,
+    // which requires the buffer-and-retry layer off (it's on by default).
+    const savedRetry = process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
+    process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY = "0";
     const encoder = new TextEncoder();
 
     globalThis.fetch = async () => new Response(new ReadableStream({
@@ -324,6 +328,8 @@ describe("startProxy (legacy)", () => {
     } finally {
       globalThis.fetch = originalFetch;
       restoreEnv();
+      if (savedRetry === undefined) delete process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
+      else process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY = savedRetry;
       await proxy.close();
     }
   });
@@ -331,6 +337,10 @@ describe("startProxy (legacy)", () => {
   test("cancels the upstream reader when the downstream client disconnects mid-stream", async () => {
     const originalFetch = globalThis.fetch;
     const restoreEnv = installDummyAwsEnv();
+    // Mid-stream cancel only applies when the proxy streams live; pin retry off
+    // so the openai-responses path isn't buffered end-to-end.
+    const savedRetry = process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
+    process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY = "0";
     const encoder = new TextEncoder();
     let upstreamCancelled = false;
 
@@ -363,6 +373,8 @@ describe("startProxy (legacy)", () => {
     } finally {
       globalThis.fetch = originalFetch;
       restoreEnv();
+      if (savedRetry === undefined) delete process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
+      else process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY = savedRetry;
       await proxy.close();
     }
   });
