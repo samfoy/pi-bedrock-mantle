@@ -200,6 +200,16 @@ export async function fetchWithEmptyRetry(
   // Log the outcome. No second retry — single bounded attempt, no loop.
   logRetryOutcome(ctx, reason1, verdict2);
 
+  // If the retry didn't recover, capture the failing request body + response
+  // for forensics. input.body is the exact Bedrock request (all input items,
+  // tools, accumulated reasoning), which is what we need to diagnose the
+  // "fails consistently after N turns" pattern.
+  const recovered = verdict2.found && !verdict2.empty;
+  if (!recovered) {
+    const label = reason1 === "failed" ? "failed_retried" : "empty_retried";
+    maybeDumpBuffer(ctx, label, buffered2.bytes, input.body);
+  }
+
   return { response: rebuildResponse(second, buffered2.bytes), attempts: 2 };
 }
 
