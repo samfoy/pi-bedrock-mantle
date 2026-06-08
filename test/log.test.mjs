@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { getLogLevel, log, newRequestId, setLogLevel } from "../.tmp-test/log.js";
+import { getLogLevel, log, newRequestId, setLogFile, setLogLevel } from "../.tmp-test/log.js";
+import { mkdtempSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 function captureStderr(fn) {
   const captured = [];
@@ -117,5 +120,82 @@ describe("newRequestId", () => {
     for (let i = 0; i < 100; i++) ids.add(newRequestId());
     // 100 random 9-byte ids — collision probability is astronomical.
     assert.equal(ids.size, 100);
+  });
+});
+
+describe("file sink", () => {
+  function withTempDir(fn) {
+    const dir = mkdtempSync(join(tmpdir(), "bm-log-"));
+    try {
+      return fn(dir);
+    } finally {
+      setLogFile(undefined);
+      setLogLevel("info");
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("mirrors emitted lines to the configured file, creating parent dirs", () => {
+    withTempDir((dir) => {
+      const file = join(dir, "nested", "bedrock-mantle.log");
+      setLogFile(file);
+      setLogLevel("info");
+      captureStderr(() => {
+        log.warn("empty_completion_retry", { id: "abc", attempt: 1, action: "retrying" });
+        log.info("empty_completion_retry", { id: "abc", attempt: 2, outcome: "recovered" });
+      });
+      assert.ok(existsSync(file), "log file should be created");
+      const contents = readFileSync(file, "utf-8");
+      assert.match(contents, /kind=empty_completion_retry id=abc attempt=1 action=retrying/);
+      assert.match(contents, /kind=empty_completion_retry id=abc attempt=2 outcome=recovered/);
+    });
+  });
+
+  test("file sink honors the level filter (debug suppressed at info)", () => {
+    withTempDir((dir) => {
+      const file = join(dir, "out.log");
+      setLogFile(file);
+      setLogLevel("info");
+      captureStderr(() => {
+        log.debug("debug_kind", { a: 1 });
+        log.warn("warn_kind", { a: 1 });
+      });
+      const contents = readFileSync(file, "utf-8");
+      assert.doesNotMatch(contents, /debug_kind/);
+      assert.match(contents, /warn_kind/);
+    });
+  });
+
+  test("appends across calls rather than truncating", () => {
+    withTempDir((dir) => {
+      const file = join(dir, "append.log");
+      setLogFile(file);
+      setLogLevel("info");
+      captureStderr(() => log.warn("first"));
+      captureStderr(() => log.warn("second"));
+      const lines = readFileSync(file, "utf-8").trim().split("\n");
+      assert.equal(lines.length, 2);
+      assert.match(lines[0], /kind=first/);
+      assert.match(lines[1], /kind=second/);
+    });
+  });
+
+  test("no file written when sink is disabled (setLogFile undefined)", () => {
+    withTempDir((dir) => {
+      const file = join(dir, "should-not-exist.log");
+      setLogFile(undefined);
+      setLogLevel("info");
+      captureStderr(() => log.warn("warn_kind"));
+      assert.equal(existsSync(file), false);
+    });
+  });
+
+  test("still writes to stderr when the file sink is on", () => {
+    withTempDir((dir) => {
+      setLogFile(join(dir, "both.log"));
+      setLogLevel("info");
+      const out = captureStderr(() => log.warn("warn_kind", { a: 1 }));
+      assert.match(out, /kind=warn_kind a=1/);
+    });
   });
 });
