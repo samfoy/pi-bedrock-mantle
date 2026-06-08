@@ -26,6 +26,7 @@ import { fromIni, fromNodeProviderChain } from "@aws-sdk/credential-providers";
 import { SignatureV4 } from "@smithy/signature-v4";
 import { log, newRequestId } from "./log.js";
 import { maybeDetectEmptyCompletion } from "./empty-completion.js";
+import { fetchWithEmptyRetry } from "./retry.js";
 
 // ─── Port parsing (kept for backward compat with pinned env overrides) ──────
 
@@ -218,14 +219,21 @@ function makeHandler(region: string) {
       const bodyBuf = Buffer.concat(chunks);
       bytesIn = bodyBuf.length;
 
-      // 2. Sign and forward via the in-process surface
-      const rawUpstream = await signAndForward({
-        method: req.method ?? "POST",
-        path: req.url ?? "/",
-        headers: req.headers as Record<string, string | undefined>,
-        body: bodyBuf,
-        region,
-      });
+      // 2. Sign and forward via the in-process surface, with optional
+      //    buffer-and-retry on empty completions (gate via
+      //    BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY=1). The retry layer is
+      //    a no-op pass-through for non-openai-responses paths and when
+      //    the env flag is unset.
+      const { response: rawUpstream, attempts } = await fetchWithEmptyRetry(
+        {
+          method: req.method ?? "POST",
+          path: req.url ?? "/",
+          headers: req.headers as Record<string, string | undefined>,
+          body: bodyBuf,
+          region,
+        },
+        { requestId: reqId, region, path: req.url ?? "/" },
+      );
       // 2a. Wrap with the empty-completion detector for openai-responses SSE.
       // No-ops for any other path/content-type, so this is safe to apply
       // unconditionally. dispose() must be called when the client stream
@@ -234,6 +242,9 @@ function makeHandler(region: string) {
         requestId: reqId,
         region,
         path: req.url ?? "/",
+        // Pass the raw request body so dumps can include the exact prompt
+        // that triggered the empty response, for replay/forensics.
+        requestBody: bodyBuf,
       });
       const upstream = detection.response;
       upstreamStatus = upstream.status;
@@ -297,6 +308,7 @@ function makeHandler(region: string) {
         bytes_in: bytesIn,
         bytes_out: bytesOut,
         upstream_request_id: upstreamRequestId,
+        attempts,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

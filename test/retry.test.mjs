@@ -1,0 +1,260 @@
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
+
+import {
+  fetchWithEmptyRetry,
+  setRetryMode,
+} from "../.tmp-test/retry.js";
+import { setLogLevel } from "../.tmp-test/log.js";
+
+function captureStderr(fn) {
+  const captured = [];
+  const original = process.stderr.write;
+  // @ts-ignore
+  process.stderr.write = (chunk) => {
+    captured.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf-8"));
+    return true;
+  };
+  return Promise.resolve(fn()).then(
+    (result) => { process.stderr.write = original; return { result, stderr: captured.join("") }; },
+    (err) => { process.stderr.write = original; throw err; },
+  );
+}
+
+function installDummyAwsEnv() {
+  const saved = {
+    AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
+    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
+    AWS_SESSION_TOKEN: process.env.AWS_SESSION_TOKEN,
+    AWS_PROFILE: process.env.AWS_PROFILE,
+    BEDROCK_MANTLE_AWS_PROFILE: process.env.BEDROCK_MANTLE_AWS_PROFILE,
+  };
+  process.env.AWS_ACCESS_KEY_ID = "test";
+  process.env.AWS_SECRET_ACCESS_KEY = "test";
+  delete process.env.AWS_SESSION_TOKEN;
+  delete process.env.AWS_PROFILE;
+  delete process.env.BEDROCK_MANTLE_AWS_PROFILE;
+  return () => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  };
+}
+
+const SSE_HEADERS = { "content-type": "text/event-stream" };
+
+function emptyCompletionEvents() {
+  return [
+    "event: response.created\ndata: {\"foo\":1}\n\n",
+    'event: response.completed\ndata: {"response":{"model":"openai.gpt-5.5","status":"completed","output":[],"usage":{"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0}}}}\n\n',
+  ];
+}
+
+function nonEmptyCompletionEvents() {
+  return [
+    "event: response.created\ndata: {\"foo\":1}\n\n",
+    'event: response.completed\ndata: {"response":{"model":"openai.gpt-5.5","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"pong"}]}],"usage":{"output_tokens":4}}}\n\n',
+  ];
+}
+
+function sseResponse(events) {
+  const encoder = new TextEncoder();
+  return new Response(new ReadableStream({
+    start(controller) {
+      for (const e of events) controller.enqueue(encoder.encode(e));
+      controller.close();
+    },
+  }), { status: 200, headers: SSE_HEADERS });
+}
+
+/** Stub global fetch to return a sequence of canned responses, then restore. */
+function withMockedFetch(sequence, fn) {
+  const restoreEnv = installDummyAwsEnv();
+  const original = globalThis.fetch;
+  let i = 0;
+  globalThis.fetch = async () => {
+    const item = sequence[Math.min(i, sequence.length - 1)];
+    i++;
+    return typeof item === "function" ? item() : item;
+  };
+  return Promise.resolve(fn()).then(
+    (v) => { globalThis.fetch = original; restoreEnv(); return { result: v, callCount: i }; },
+    (err) => { globalThis.fetch = original; restoreEnv(); throw err; },
+  );
+}
+
+const SAMPLE_INPUT = {
+  method: "POST",
+  path: "/openai/v1/responses",
+  headers: { "content-type": "application/json" },
+  body: '{"model":"openai.gpt-5.5","input":[]}',
+  region: "us-east-2",
+};
+
+const SAMPLE_CTX = { requestId: "ctx-id", region: "us-east-2", path: "/openai/v1/responses" };
+
+describe("fetchWithEmptyRetry — retry mode OFF", () => {
+  test("pass-through: does not buffer, returns the live Response, attempts=1", async () => {
+    setRetryMode(false);
+    const { result } = await withMockedFetch(
+      [() => sseResponse(emptyCompletionEvents())],
+      () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+    );
+    assert.equal(result.attempts, 1);
+    assert.equal(result.response.status, 200);
+    // Live stream — body still readable as a stream.
+    assert.ok(result.response.body, "expected a body");
+    setRetryMode(undefined);
+  });
+});
+
+describe("fetchWithEmptyRetry — retry mode ON", () => {
+  test("non-openai-responses path: skipped entirely, no buffering, attempts=1", async () => {
+    setRetryMode(true);
+    const { result, callCount } = await withMockedFetch(
+      [() => sseResponse(emptyCompletionEvents())],
+      () => fetchWithEmptyRetry(
+        { ...SAMPLE_INPUT, path: "/v1/chat/completions" },
+        { ...SAMPLE_CTX, path: "/v1/chat/completions" },
+      ),
+    );
+    assert.equal(result.attempts, 1);
+    assert.equal(callCount, 1);
+    setRetryMode(undefined);
+  });
+
+  test("non-SSE response: pass-through, attempts=1", async () => {
+    setRetryMode(true);
+    const { result, callCount } = await withMockedFetch(
+      [() => new Response('{"error":"x"}', { status: 500, headers: { "content-type": "application/json" } })],
+      () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+    );
+    assert.equal(result.attempts, 1);
+    assert.equal(callCount, 1);
+    assert.equal(result.response.status, 500);
+    setRetryMode(undefined);
+  });
+
+  test("first attempt non-empty: buffered + reconstructed, attempts=1, body bytes preserved", async () => {
+    setRetryMode(true);
+    setLogLevel("silent");
+    const events = nonEmptyCompletionEvents();
+    const { result, callCount } = await withMockedFetch(
+      [() => sseResponse(events)],
+      () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+    );
+    assert.equal(result.attempts, 1);
+    assert.equal(callCount, 1);
+    const body = await result.response.text();
+    assert.equal(body, events.join(""));
+    setRetryMode(undefined);
+    setLogLevel("info");
+  });
+
+  test("first empty, second non-empty: retries once, returns second response, logs recovered", async () => {
+    setRetryMode(true);
+    setLogLevel("info");
+    const successEvents = nonEmptyCompletionEvents();
+
+    const { result, callCount, ...rest } = await captureStderr(async () => {
+      return await withMockedFetch(
+        [
+          () => sseResponse(emptyCompletionEvents()),
+          () => sseResponse(successEvents),
+        ],
+        () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+      );
+    }).then((wrapped) => ({ ...wrapped.result, stderr: wrapped.stderr }));
+
+    assert.equal(result.attempts, 2);
+    assert.equal(callCount, 2);
+    const body = await result.response.text();
+    assert.equal(body, successEvents.join(""), "expected second-attempt body to be forwarded");
+    assert.match(rest.stderr, /level=warn kind=empty_completion_retry.*attempt=1.*action=retrying/);
+    assert.match(rest.stderr, /level=info kind=empty_completion_retry.*attempt=2.*outcome=recovered/);
+    setRetryMode(undefined);
+  });
+
+  test("both attempts empty: forwards second response, logs still_empty, no third attempt", async () => {
+    setRetryMode(true);
+    setLogLevel("warn");
+    const empties = emptyCompletionEvents();
+
+    const { result, callCount, stderr } = await captureStderr(async () => {
+      return await withMockedFetch(
+        [
+          () => sseResponse(empties),
+          () => sseResponse(empties),
+          () => sseResponse(nonEmptyCompletionEvents()), // would-be third — must NOT be called
+        ],
+        () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+      );
+    }).then((wrapped) => ({ ...wrapped.result, stderr: wrapped.stderr }));
+
+    assert.equal(result.attempts, 2);
+    assert.equal(callCount, 2, "must not attempt a third call");
+    assert.match(stderr, /level=warn kind=empty_completion_retry.*attempt=1.*action=retrying/);
+    assert.match(stderr, /level=warn kind=empty_completion_retry.*attempt=2.*outcome=still_empty/);
+    setRetryMode(undefined);
+    setLogLevel("info");
+  });
+
+  test("retry returns non-SSE error response: forwarded as-is without further inspection", async () => {
+    setRetryMode(true);
+    setLogLevel("silent");
+    const { result, callCount } = await withMockedFetch(
+      [
+        () => sseResponse(emptyCompletionEvents()),
+        () => new Response('{"error":"throttled"}', { status: 429, headers: { "content-type": "application/json" } }),
+      ],
+      () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+    );
+    assert.equal(result.attempts, 2);
+    assert.equal(callCount, 2);
+    assert.equal(result.response.status, 429);
+    setRetryMode(undefined);
+    setLogLevel("info");
+  });
+});
+
+describe("retry mode env parsing", () => {
+  test("env values 1 / true / yes / on enable retry; everything else disables", async () => {
+    const saved = process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
+    setRetryMode(undefined); // clear test override so env is consulted
+
+    const cases = [
+      ["1", true],
+      ["true", true],
+      ["TRUE", true],
+      ["yes", true],
+      ["on", true],
+      ["0", false],
+      ["false", false],
+      ["", false],
+      [undefined, false],
+    ];
+
+    for (const [val, expected] of cases) {
+      if (val === undefined) delete process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
+      else process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY = val;
+
+      const { result, callCount } = await withMockedFetch(
+        [
+          () => sseResponse(emptyCompletionEvents()),
+          () => sseResponse(nonEmptyCompletionEvents()),
+        ],
+        () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+      );
+      assert.equal(
+        result.attempts,
+        expected ? 2 : 1,
+        `expected attempts=${expected ? 2 : 1} for env=${JSON.stringify(val)}`,
+      );
+      assert.equal(callCount, expected ? 2 : 1);
+    }
+
+    if (saved === undefined) delete process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
+    else process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY = saved;
+  });
+});

@@ -27,6 +27,8 @@
  *     pass-through; we just don't add detection there yet.
  */
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { log } from "./log.js";
 
 /** Context carried into the detector so log lines correlate to the proxy request. */
@@ -34,6 +36,12 @@ export interface EmptyCompletionContext {
   requestId: string;
   region: string;
   path: string;
+  /**
+   * Optional: the original request body bytes. When `BEDROCK_MANTLE_EMPTY_DUMP_DIR`
+   * is set, this is captured alongside the empty response so we can replay
+   * the exact request that triggered the failure.
+   */
+  requestBody?: Buffer | string;
 }
 
 /**
@@ -193,6 +201,49 @@ function handleSseEvent(event: SseEvent, ctx: EmptyCompletionContext): void {
       output_item_types: verdict.outputItemTypes.join(","),
       stop_reason: verdict.status,
       hint: "model returned no message content after tool use; lower reasoning effort or raise max_output_tokens",
+    });
+    maybeDumpPayload(ctx, parsed);
+  }
+}
+
+/**
+ * When `BEDROCK_MANTLE_EMPTY_DUMP_DIR` is set, write the full parsed
+ * response.completed payload to `<dir>/empty-<requestId>.json`. Used as a
+ * forensic tap when we're chasing the root cause of empty completions.
+ *
+ * Failure to write is logged at debug — we never want diagnostic plumbing to
+ * affect the user-visible response.
+ */
+function maybeDumpPayload(ctx: EmptyCompletionContext, payload: unknown): void {
+  const dir = process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR;
+  if (!dir) return;
+  try {
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, `empty-${ctx.requestId}.json`);
+    let requestPayload: unknown;
+    if (ctx.requestBody !== undefined) {
+      const bodyStr = typeof ctx.requestBody === "string"
+        ? ctx.requestBody
+        : ctx.requestBody.toString("utf-8");
+      try {
+        requestPayload = JSON.parse(bodyStr);
+      } catch {
+        requestPayload = bodyStr;
+      }
+    }
+    writeFileSync(path, JSON.stringify({
+      capturedAt: new Date().toISOString(),
+      region: ctx.region,
+      path: ctx.path,
+      requestId: ctx.requestId,
+      request: requestPayload,
+      response: payload,
+    }, null, 2));
+    log.info("empty_completion_dump", { id: ctx.requestId, path });
+  } catch (err) {
+    log.debug("empty_completion_dump_failed", {
+      id: ctx.requestId,
+      error: err instanceof Error ? err : String(err),
     });
   }
 }

@@ -32,6 +32,7 @@
     "models.ts",
     "log.ts",
     "empty-completion.ts",
+    "retry.ts",
     "README.md",
     "LICENSE"
   ],
