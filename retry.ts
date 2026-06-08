@@ -123,6 +123,20 @@ export async function fetchWithEmptyRetry(
   const verdict1 = inspectBufferedSse(buffered.text);
 
   if (!verdict1.empty) {
+    // A fully-buffered openai-responses stream where we never parsed a
+    // `response.completed` event — either it wasn't emitted (anomalous; it's
+    // the terminal event) or the event was present but failed JSON parse. We
+    // don't retry it blindly (a missing terminal can be a streamed
+    // response.failed/incomplete or a client cancel), but surface it at debug
+    // so we can spot a "stream ended with no usable completion" empty variant.
+    if (!verdict1.found) {
+      log.debug("empty_completion_no_terminal", {
+        id: ctx.requestId,
+        region: ctx.region,
+        bytes: buffered.bytes.byteLength,
+        hint: "no parseable response.completed event in buffered openai-responses SSE",
+      });
+    }
     // Most common path: pass through the buffered bytes as a fresh Response.
     return { response: rebuildResponse(first, buffered.bytes), attempts: 1 };
   }
