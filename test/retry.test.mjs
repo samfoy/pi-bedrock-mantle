@@ -381,3 +381,95 @@ describe("empty-completion capture (no terminal / non-SSE)", () => {
     });
   });
 });
+
+describe("transient response.failed retry", () => {
+  function failedEvents(code = "server_error") {
+    return [
+      "event: response.created\ndata: {\"foo\":1}\n\n",
+      `event: response.failed\ndata: {"response":{"model":"openai.gpt-5.5","status":"failed","error":{"code":"${code}","message":"boom"}}}\n\n`,
+    ];
+  }
+
+  test("server_error response.failed: retries once, recovers, attempts=2, logs upstream_failed_retry", async () => {
+    setRetryMode(true);
+    setLogLevel("info");
+    const { result, callCount, stderr } = await captureStderr(async () =>
+      withMockedFetch(
+        [() => sseResponse(failedEvents()), () => sseResponse(nonEmptyCompletionEvents())],
+        () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+      ),
+    ).then((w) => ({ ...w.result, stderr: w.stderr }));
+    assert.equal(result.attempts, 2);
+    assert.equal(callCount, 2);
+    assert.equal(await result.response.text(), nonEmptyCompletionEvents().join(""));
+    assert.match(stderr, /kind=upstream_failed_retry.*error_code=server_error.*attempt=1.*action=retrying/);
+    assert.match(stderr, /kind=upstream_failed_retry.*attempt=2.*outcome=recovered/);
+    setRetryMode(undefined);
+  });
+
+  test("both attempts response.failed: forwards second, logs still_failed, no third call", async () => {
+    setRetryMode(true);
+    setLogLevel("warn");
+    const { result, callCount, stderr } = await captureStderr(async () =>
+      withMockedFetch(
+        [
+          () => sseResponse(failedEvents()),
+          () => sseResponse(failedEvents()),
+          () => sseResponse(nonEmptyCompletionEvents()), // must NOT be called
+        ],
+        () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+      ),
+    ).then((w) => ({ ...w.result, stderr: w.stderr }));
+    assert.equal(result.attempts, 2);
+    assert.equal(callCount, 2, "single retry only");
+    assert.match(stderr, /kind=upstream_failed_retry.*attempt=2.*outcome=still_failed/);
+    setRetryMode(undefined);
+    setLogLevel("info");
+  });
+
+  test("non-transient failure (invalid_request_error): NOT retried, passes through", async () => {
+    setRetryMode(true);
+    setLogLevel("silent");
+    const { result, callCount } = await withMockedFetch(
+      [() => sseResponse(failedEvents("invalid_request_error")), () => sseResponse(nonEmptyCompletionEvents())],
+      () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+    );
+    assert.equal(result.attempts, 1, "client errors must not be retried");
+    assert.equal(callCount, 1);
+    setRetryMode(undefined);
+    setLogLevel("info");
+  });
+
+  test("response.failed with no error code: treated as transient, retried once", async () => {
+    setRetryMode(true);
+    setLogLevel("silent");
+    const noCode = [
+      "event: response.created\ndata: {\"foo\":1}\n\n",
+      'event: response.failed\ndata: {"response":{"model":"openai.gpt-5.5","status":"failed","error":{}}}\n\n',
+    ];
+    const { result, callCount } = await withMockedFetch(
+      [() => sseResponse(noCode), () => sseResponse(nonEmptyCompletionEvents())],
+      () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+    );
+    assert.equal(result.attempts, 2);
+    assert.equal(callCount, 2);
+    setRetryMode(undefined);
+    setLogLevel("info");
+  });
+
+  test("first transient-failed, retry returns non-retryable failure: NOT logged as recovered", async () => {
+    setRetryMode(true);
+    setLogLevel("warn");
+    const { result, stderr } = await captureStderr(async () =>
+      withMockedFetch(
+        [() => sseResponse(failedEvents("server_error")), () => sseResponse(failedEvents("invalid_request_error"))],
+        () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+      ),
+    ).then((w) => ({ ...w.result, stderr: w.stderr }));
+    assert.equal(result.attempts, 2);
+    assert.doesNotMatch(stderr, /outcome=recovered/, "a second-attempt failure is not a recovery");
+    assert.match(stderr, /outcome=still_failed/);
+    setRetryMode(undefined);
+    setLogLevel("info");
+  });
+});
