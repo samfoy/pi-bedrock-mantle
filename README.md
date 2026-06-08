@@ -132,11 +132,13 @@ correlate a user-visible failure to the matching server log.
 
 ### Empty-completion detection
 
-GPT-5.x via the OpenAI Responses API can occasionally return zero visible
-content after running tools — the model exhausts its output budget on hidden
-reasoning and emits `output_tokens: 0` with `stop_reason: "stop"`. To pi (and
-any agent loop) this looks like a clean "done" with nothing to render, and
-the slot exits silently mid-turn.
+GPT-5.x via the OpenAI Responses API has a measured ~10–20% stochastic
+failure rate on tool-using requests — the model returns zero output items
+with `output_tokens: 0` and `stop_reason: "completed"`. The same exact
+request succeeds 80–90% of the time and produces nothing the rest. To pi
+(and any agent loop) this looks like a clean "done" with nothing to
+render, and the slot exits silently mid-turn. Forensics:
+`forensics-2026-06-07/findings.md`.
 
 The proxy detects this pattern on `/openai/v1/responses` SSE streams without
 modifying the response. When detected, it emits a warn-level log line
@@ -144,8 +146,8 @@ correlated to the request id:
 
 ```
 [bedrock-mantle] level=warn kind=empty_completion id=Az3kP9 region=us-east-2
-  model=openai.gpt-5.5 output_tokens=0 reasoning_tokens=850
-  output_item_types=reasoning stop_reason=completed
+  model=openai.gpt-5.5 output_tokens=0 reasoning_tokens=0
+  output_item_types= stop_reason=completed
   hint="model returned no message content after tool use; lower reasoning effort or raise max_output_tokens"
 ```
 
@@ -153,3 +155,25 @@ The upstream bytes are passed to the client unchanged — detection is
 observability only, never a transformation. Pi (or operators reading the
 log) can decide whether to retry, surface the error to the user, or adjust
 the reasoning-effort knob.
+
+### Empty-completion retry (opt-in)
+
+Set `BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY=1` to make the proxy buffer
+`/openai/v1/responses` SSE responses end-to-end and retry once when the
+first attempt is empty. Empirically takes the user-visible empty rate from
+~10–20% to ~1–2%. One retry max — no infinite loop.
+
+Log lines on retry:
+
+```
+[bedrock-mantle] level=warn kind=empty_completion_retry id=… attempt=1 action=retrying
+[bedrock-mantle] level=info kind=empty_completion_retry id=… attempt=2 outcome=recovered
+[bedrock-mantle] level=warn kind=empty_completion_retry id=… attempt=2 outcome=still_empty   # rare
+```
+
+Tradeoff: enabling retry buffers the entire SSE response in memory before
+forwarding to the client, so streaming "feels" like a single burst on
+`/openai/v1/responses` traffic. For tool-call-only first turns this is
+~free (responses are small, < 200KB); for long visible-text responses it
+adds latency equal to the full response time. Off by default; flip on
+when you're using gpt-5.x with tools and accept the latency tradeoff.
