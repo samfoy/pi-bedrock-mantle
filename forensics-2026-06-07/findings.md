@@ -182,3 +182,38 @@ confirm the exact shape (and rule out a "stream ends with no
 response.completed" third variant — now logged at debug as
 `empty_completion_no_terminal`), set `BEDROCK_MANTLE_EMPTY_DUMP_DIR` and
 `BEDROCK_MANTLE_LOG=debug` and keep using gpt-5.5 until it idles again.
+
+## Followup: the "empty stream" is actually `response.failed` (server_error) (2026-06-08)
+
+Captured the real payload after wiring up `BEDROCK_MANTLE_EMPTY_DUMP_DIR` on
+the dashboard slots. Four `no_terminal` dumps from session `019ea8f2`
+(oncall-triage, gpt-5.5) are all the **same shape**, and it is **not** the
+empty-completion bug:
+
+```
+response.created
+response.in_progress
+response.output_item.added        (reasoning)
+response.function_call_arguments.delta ×25   (building: read SKILL.md)
+response.function_call_arguments.done
+response.output_item.done         (function_call complete)
+response.failed   error={"code":"server_error","message":"The server had an error while processing your request. Sorry about that!"}
+```
+
+The model emits a **complete, valid function_call**, then the stream ends with
+`response.failed` carrying `server_error` instead of `response.completed`.
+This is a **transient upstream 5xx delivered as an SSE event mid-stream**, not
+an idle/empty model turn. pi sees no `response.completed`, can't use the
+function_call, and surfaces "Provider returned an empty stream (0 chars, 0
+tools)".
+
+Why our retry didn't catch it: the detector only looked for `response.completed`
+with empty output. A terminal `response.failed` is a different event.
+
+Fix: the retry layer now treats a terminal `response.failed` with a transient
+error code (`server_error`, `internal_error`, `rate_limit_exceeded`,
+`service_unavailable`, `server_overloaded`, `overloaded_error`, `timeout`, or
+no code) as retryable — re-issues the identical request once. Client-side
+failures (e.g. `invalid_request_error`) pass through without a wasted retry.
+Logged as `kind=upstream_failed_retry`. This is distinct from, and in addition
+to, the empty-completion retry.

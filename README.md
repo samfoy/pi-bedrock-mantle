@@ -231,3 +231,24 @@ Each capture writes `<dir>/<label>-<requestId>.json` with the full request
 body and raw response bytes, so the exact shape can be analysed before
 extending retry to cover it. Detected empties (`kind=empty_completion`) are
 also dumped here. Errors (4xx/5xx) are never dumped.
+
+### Transient `response.failed` retry
+
+gpt-5.x on Bedrock intermittently ends an openai-responses stream with a
+terminal `response.failed` event carrying a server-side error code (e.g.
+`server_error`) — a 5xx surfaced as an SSE event mid-stream, sometimes *after*
+emitting a complete `function_call`. pi sees no `response.completed` and
+reports "Provider returned an empty stream".
+
+The same buffer-and-retry layer now treats this as retryable: a terminal
+`response.failed` whose error code is transient (`server_error`,
+`internal_error`, `rate_limit_exceeded`, `service_unavailable`,
+`server_overloaded`, `overloaded_error`, `timeout`, or no code) is re-issued
+once. Client-side failures (`invalid_request_error`, content filter, …) pass
+through untouched. Logged as `kind=upstream_failed_retry`:
+
+```
+[bedrock-mantle] level=warn kind=upstream_failed_retry id=… error_code=server_error attempt=1 action=retrying
+[bedrock-mantle] level=info kind=upstream_failed_retry id=… attempt=2 outcome=recovered
+[bedrock-mantle] level=warn kind=upstream_failed_retry id=… attempt=2 outcome=still_failed   # rare
+```

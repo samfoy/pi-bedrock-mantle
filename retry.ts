@@ -10,11 +10,14 @@
  * This module wraps `signAndForward` with a buffer-and-retry layer:
  *
  *   1. First attempt streams as usual into a memory buffer.
- *   2. We parse the buffered SSE for `response.completed` and apply the
- *      same `inspectResponseCompleted` verdict as the passive detector.
- *   3. If empty AND retry mode is on, re-sign and re-issue the same request
- *      once. Single retry — no infinite loop. Empirically takes the
- *      user-visible empty rate from ~10% to ~1%.
+ *   2. We parse the buffered SSE terminal event and decide whether to retry:
+ *        - empty completion  (`response.completed` with no actionable output), or
+ *        - transient failure (`response.failed` with a server-side error code
+ *          like `server_error` — a 5xx surfaced as an SSE event mid-stream;
+ *          observed on gpt-5.5 even after a complete function_call. See
+ *          `forensics-2026-06-07/findings.md`).
+ *   3. If retryable AND retry mode is on, re-sign and re-issue the same
+ *      request once. Single retry — no infinite loop.
  *   4. The buffered (or retried-buffered) bytes are reconstructed into a
  *      Response that the caller streams to the client.
  *
@@ -144,37 +147,41 @@ export async function fetchWithEmptyRetry(
 
   const buffered = await bufferResponse(first);
   const verdict1 = inspectBufferedSse(buffered.text);
+  const reason1 = retryReason(verdict1);
 
-  if (!verdict1.empty) {
-    // A fully-buffered openai-responses stream where we never parsed a
-    // `response.completed` event — either it wasn't emitted (anomalous; it's
-    // the terminal event) or the event was present but failed JSON parse.
-    // This is the suspected "empty stream" variant pi's dashboard reports as
-    // "0 chars, 0 tools". We don't retry it blindly (a missing terminal can
-    // be a streamed response.failed/incomplete or a client cancel), but log
-    // at warn and capture the raw bytes (when a dump dir is set) so we can
-    // confirm the exact shape before extending retry to cover it.
-    if (!verdict1.found) {
+  if (!reason1) {
+    // Not retryable. Two sub-cases worth capturing for forensics:
+    if (verdict1.failed) {
+      // A terminal response.failed with a non-transient (client-side) error
+      // code — retrying won't help, so pass it through, but record it.
+      log.warn("upstream_failed", {
+        id: ctx.requestId,
+        region: ctx.region,
+        model: verdict1.model,
+        error_code: verdict1.errorCode,
+        retryable: false,
+      });
+      maybeDumpBuffer(ctx, "failed", buffered.bytes, input.body);
+    } else if (!verdict1.found) {
+      // Stream closed with no parseable response.completed AND no
+      // response.failed — genuinely anomalous. Capture but don't retry
+      // blindly (could be a client cancel or partial).
       log.warn("empty_completion_no_terminal", {
         id: ctx.requestId,
         region: ctx.region,
         bytes: buffered.bytes.byteLength,
-        hint: "no parseable response.completed in buffered openai-responses SSE",
+        hint: "no parseable response.completed or response.failed in buffered SSE",
       });
       maybeDumpBuffer(ctx, "no_terminal", buffered.bytes, input.body);
     }
-    // Most common path: pass through the buffered bytes as a fresh Response.
+    // Happy path (response.completed with output) and the captured cases all
+    // pass the buffered bytes through unchanged.
     return { response: rebuildResponse(first, buffered.bytes), attempts: 1 };
   }
 
-  // First attempt was empty. Log and retry once.
-  log.warn("empty_completion_retry", {
-    id: ctx.requestId,
-    region: ctx.region,
-    model: verdict1.model,
-    attempt: 1,
-    action: "retrying",
-  });
+  // First attempt is retryable (empty completion, or a transient
+  // response.failed). Log and retry once with the identical request.
+  logRetryAttempt1(ctx, reason1, verdict1);
 
   const second = await signAndForward(input);
   if (!second.body) {
@@ -183,35 +190,62 @@ export async function fetchWithEmptyRetry(
   }
   const ct2 = (second.headers.get("content-type") ?? "").toLowerCase();
   if (!ct2.includes("text/event-stream")) {
-    // Retry surface changed (error response). Forward as-is.
+    // Retry surface changed (e.g. an HTTP error response). Forward as-is.
     return { response: second, attempts: 2 };
   }
 
   const buffered2 = await bufferResponse(second);
   const verdict2 = inspectBufferedSse(buffered2.text);
 
-  if (verdict2.empty) {
-    // Both attempts empty — accept defeat and forward the second response.
-    // No infinite-retry loop; logging at warn so operators see double-empty
-    // events and can tune model / effort.
-    log.warn("empty_completion_retry", {
-      id: ctx.requestId,
-      region: ctx.region,
-      model: verdict2.model,
-      attempt: 2,
-      outcome: "still_empty",
-    });
-  } else {
-    log.info("empty_completion_retry", {
-      id: ctx.requestId,
-      region: ctx.region,
-      model: verdict2.model,
-      attempt: 2,
-      outcome: "recovered",
-    });
-  }
+  // Log the outcome. No second retry — single bounded attempt, no loop.
+  logRetryOutcome(ctx, reason1, verdict2);
 
   return { response: rebuildResponse(second, buffered2.bytes), attempts: 2 };
+}
+
+/**
+ * Why a buffered first attempt should be retried, or null if it shouldn't.
+ *   - "empty"  : the empty-completion verdict fired (no actionable output).
+ *   - "failed" : a terminal response.failed with a transient error code.
+ */
+function retryReason(v: BufferedScan): "empty" | "failed" | null {
+  if (v.empty) return "empty";
+  if (v.failed && isRetryableFailure(v.errorCode)) return "failed";
+  return null;
+}
+
+function logRetryAttempt1(ctx: RetryContext, reason: "empty" | "failed", v: BufferedScan): void {
+  if (reason === "empty") {
+    log.warn("empty_completion_retry", {
+      id: ctx.requestId, region: ctx.region, model: v.model, attempt: 1, action: "retrying",
+    });
+  } else {
+    log.warn("upstream_failed_retry", {
+      id: ctx.requestId, region: ctx.region, model: v.model,
+      error_code: v.errorCode, attempt: 1, action: "retrying",
+    });
+  }
+}
+
+function logRetryOutcome(
+  ctx: RetryContext,
+  reason1: "empty" | "failed",
+  v2: BufferedScan,
+): void {
+  const kind = reason1 === "empty" ? "empty_completion_retry" : "upstream_failed_retry";
+  // Genuine recovery = the retry produced a usable response.completed with
+  // actionable output. Anything else (still empty, any failure — transient or
+  // not — or no terminal event) is not a recovery.
+  const recovered = v2.found && !v2.empty;
+  if (recovered) {
+    log.info(kind, { id: ctx.requestId, region: ctx.region, model: v2.model, attempt: 2, outcome: "recovered" });
+  } else {
+    const outcome = v2.empty ? "still_empty" : v2.failed ? "still_failed" : "still_no_terminal";
+    log.warn(kind, {
+      id: ctx.requestId, region: ctx.region, model: v2.model,
+      error_code: v2.errorCode, attempt: 2, outcome,
+    });
+  }
 }
 
 // ─── Internals ───────────────────────────────────────────────────────────────
@@ -293,14 +327,58 @@ function maybeDumpBuffer(
 }
 
 /**
- * Scan a buffered SSE stream for a `response.completed` event and apply the
- * same empty-completion verdict logic as the passive detector.
+ * Result of scanning a fully-buffered openai-responses SSE stream:
+ *   - the empty-completion verdict (from a `response.completed` event),
+ *   - `found`  : a `response.completed` event was parsed,
+ *   - `failed` : a terminal `response.failed` event was parsed,
+ *   - `errorCode` : the `error.code` from a `response.failed` event.
+ */
+type BufferedScan = EmptyCompletionVerdict & {
+  found: boolean;
+  failed: boolean;
+  errorCode?: string;
+};
+
+/**
+ * Transient `response.failed` error codes worth a single retry. gpt-5.x on
+ * Bedrock intermittently ends a stream with `response.failed` carrying a
+ * `server_error` (a 5xx surfaced as an SSE event rather than an HTTP status)
+ * even after emitting a complete function_call — see
+ * `forensics-2026-06-07/findings.md`. These are upstream instability, not a
+ * client problem, so retrying the identical request usually succeeds.
+ */
+const RETRYABLE_FAILED_CODES = new Set([
+  "server_error",
+  "internal_error",
+  "service_unavailable",
+  "server_overloaded",
+  "overloaded_error",
+  "gateway_timeout",
+  "bad_gateway",
+  "timeout",
+]);
+
+/**
+ * A `response.failed` is retryable when its error code is a known transient
+ * server-side condition, or when no code is present (ambiguous — one retry is
+ * low-harm). Client-side failures (invalid_request_error, content_filter, …)
+ * are NOT in the set, so they pass through without a wasted retry.
+ */
+function isRetryableFailure(code: string | undefined): boolean {
+  if (!code) return true;
+  return RETRYABLE_FAILED_CODES.has(code.toLowerCase());
+}
+
+/**
+ * Scan a buffered SSE stream for the terminal event. Returns the
+ * empty-completion verdict when it's a `response.completed`, or a failure
+ * marker when it's a `response.failed`.
  *
  * Inline rather than calling into empty-completion.ts because the retry path
  * has a fully-buffered string (not an in-flight ReadableStream), so we can
  * use a simpler synchronous parse.
  */
-function inspectBufferedSse(text: string): EmptyCompletionVerdict & { found: boolean } {
+function inspectBufferedSse(text: string): BufferedScan {
   // SSE events are separated by blank lines (\n\n). Append one to ensure the
   // final event parses if upstream didn't write a trailing newline.
   const buffer = text.endsWith("\n\n") ? text : text + "\n\n";
@@ -319,16 +397,30 @@ function inspectBufferedSse(text: string): EmptyCompletionVerdict & { found: boo
       if (line.startsWith("event:")) eventType = line.slice(6).trim();
       else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
     }
-    if (eventType !== "response.completed" || dataLines.length === 0) continue;
-
+    if (dataLines.length === 0) continue;
     const dataStr = dataLines.join("\n");
     if (dataStr === "[DONE]") continue;
-    try {
-      const parsed = JSON.parse(dataStr);
-      return { ...inspectResponseCompleted(parsed), found: true };
-    } catch {
-      // Malformed event — ignore and keep scanning.
+
+    if (eventType === "response.completed") {
+      try {
+        const parsed = JSON.parse(dataStr);
+        return { ...inspectResponseCompleted(parsed), found: true, failed: false };
+      } catch {
+        // Malformed event — ignore and keep scanning.
+      }
+    } else if (eventType === "response.failed") {
+      try {
+        const parsed = JSON.parse(dataStr) as Record<string, unknown>;
+        const resp = (parsed.response ?? parsed) as Record<string, unknown>;
+        const err = resp.error as Record<string, unknown> | undefined;
+        const code = err && typeof err.code === "string" ? err.code : undefined;
+        const model = typeof resp.model === "string" ? resp.model : undefined;
+        return { empty: false, outputItemTypes: [], found: false, failed: true, errorCode: code, model };
+      } catch {
+        // Malformed failed event — still a terminal failure, just no code.
+        return { empty: false, outputItemTypes: [], found: false, failed: true };
+      }
     }
   }
-  return { empty: false, outputItemTypes: [], found: false };
+  return { empty: false, outputItemTypes: [], found: false, failed: false };
 }
