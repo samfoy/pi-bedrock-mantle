@@ -24,7 +24,7 @@
     "clean": "rm -rf .tmp-test",
     "build": "echo 'nothing to build'",
     "check": "tsc --noEmit",
-    "test": "rm -rf .tmp-test && tsc --noEmit false --outDir .tmp-test && BEDROCK_MANTLE_LOG_FILE= node --test test/*.test.mjs"
+    "test": "rm -rf .tmp-test && tsc --noEmit false --outDir .tmp-test && BEDROCK_MANTLE_LOG_FILE= BEDROCK_MANTLE_EMPTY_DUMP_DIR= node --test test/*.test.mjs"
   },
   "files": [
     "index.ts",
