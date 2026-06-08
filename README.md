@@ -130,6 +130,28 @@ Every proxied response carries an `x-bedrock-mantle-request-id` header that
 matches the `id=` field in the log line, so callers (pi, dashboards) can
 correlate a user-visible failure to the matching server log.
 
+### Durable log file (`BEDROCK_MANTLE_LOG_FILE`)
+
+Stderr is ephemeral when pi runs over RPC (e.g. under pi-dashboard, where a
+parent process consumes the child's stderr and it never reaches disk). To
+capture log lines durably, set `BEDROCK_MANTLE_LOG_FILE` to a path:
+
+```
+BEDROCK_MANTLE_LOG_FILE=~/.pi/logs/bedrock-mantle.log
+```
+
+Every line that passes the `BEDROCK_MANTLE_LOG` level filter is appended to the
+file in addition to stderr (parent directories are created automatically).
+This is the reliable way to audit `kind=empty_completion` and
+`kind=empty_completion_retry` events after the fact:
+
+```
+grep empty_completion ~/.pi/logs/bedrock-mantle.log
+```
+
+If the file can't be written, the sink disables itself after one warning and
+stderr logging continues unaffected.
+
 ### Empty-completion detection
 
 GPT-5.x via the OpenAI Responses API has a measured ~10–20% stochastic
