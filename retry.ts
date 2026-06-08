@@ -41,6 +41,8 @@
 import { inspectResponseCompleted, type EmptyCompletionVerdict } from "./empty-completion.js";
 import { log } from "./log.js";
 import { signAndForward, type SignAndForwardInput } from "./proxy.js";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 export interface RetryContext {
   requestId: string;
@@ -114,8 +116,29 @@ export async function fetchWithEmptyRetry(
   // First attempt
   const first = await signAndForward(input);
   const ct = (first.headers.get("content-type") ?? "").toLowerCase();
-  if (!ct.includes("text/event-stream") || !first.body) {
+  if (!ct.includes("text/event-stream")) {
+    // Streaming openai-responses requests should come back as SSE. A 200
+    // non-SSE response is anomalous and a candidate empty-completion variant
+    // (pi's driver expects a stream and sees nothing) — capture it for
+    // forensics when a dump dir is configured. Errors (4xx/5xx) are expected
+    // to be non-SSE and pass through untouched.
+    if (first.status === 200 && first.body && process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR) {
+      const buf = await bufferResponse(first);
+      log.warn("empty_completion_non_sse", {
+        id: ctx.requestId,
+        region: ctx.region,
+        status: 200,
+        content_type: ct || "(none)",
+        bytes: buf.bytes.byteLength,
+        hint: "200 openai-responses reply was not text/event-stream",
+      });
+      maybeDumpBuffer(ctx, "non_sse", buf.bytes, input.body);
+      return { response: rebuildResponse(first, buf.bytes), attempts: 1 };
+    }
     // Non-SSE responses (errors, plain JSON) flow through unchanged.
+    return { response: first, attempts: 1 };
+  }
+  if (!first.body) {
     return { response: first, attempts: 1 };
   }
 
@@ -125,17 +148,20 @@ export async function fetchWithEmptyRetry(
   if (!verdict1.empty) {
     // A fully-buffered openai-responses stream where we never parsed a
     // `response.completed` event — either it wasn't emitted (anomalous; it's
-    // the terminal event) or the event was present but failed JSON parse. We
-    // don't retry it blindly (a missing terminal can be a streamed
-    // response.failed/incomplete or a client cancel), but surface it at debug
-    // so we can spot a "stream ended with no usable completion" empty variant.
+    // the terminal event) or the event was present but failed JSON parse.
+    // This is the suspected "empty stream" variant pi's dashboard reports as
+    // "0 chars, 0 tools". We don't retry it blindly (a missing terminal can
+    // be a streamed response.failed/incomplete or a client cancel), but log
+    // at warn and capture the raw bytes (when a dump dir is set) so we can
+    // confirm the exact shape before extending retry to cover it.
     if (!verdict1.found) {
-      log.debug("empty_completion_no_terminal", {
+      log.warn("empty_completion_no_terminal", {
         id: ctx.requestId,
         region: ctx.region,
         bytes: buffered.bytes.byteLength,
-        hint: "no parseable response.completed event in buffered openai-responses SSE",
+        hint: "no parseable response.completed in buffered openai-responses SSE",
       });
+      maybeDumpBuffer(ctx, "no_terminal", buffered.bytes, input.body);
     }
     // Most common path: pass through the buffered bytes as a fresh Response.
     return { response: rebuildResponse(first, buffered.bytes), attempts: 1 };
@@ -219,6 +245,51 @@ function rebuildResponse(original: Response, bytes: Uint8Array): Response {
     statusText: original.statusText,
     headers: original.headers,
   });
+}
+
+/**
+ * When `BEDROCK_MANTLE_EMPTY_DUMP_DIR` is set, write the raw buffered response
+ * bytes plus the originating request body to
+ * `<dir>/<label>-<requestId>.json`. Used to capture empty-completion variants
+ * (no-terminal SSE, non-SSE 200) that the passive detector / verdict logic
+ * doesn't flag, so we can analyse the exact shape and extend handling.
+ *
+ * Failure to write is logged at debug — diagnostic plumbing must never affect
+ * the user-visible response.
+ */
+function maybeDumpBuffer(
+  ctx: RetryContext,
+  label: string,
+  bytes: Uint8Array,
+  requestBody: Buffer | string | undefined,
+): void {
+  const dir = process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR;
+  if (!dir) return;
+  try {
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, `${label}-${ctx.requestId}.json`);
+    let request: unknown;
+    if (requestBody !== undefined) {
+      const bodyStr = typeof requestBody === "string" ? requestBody : requestBody.toString("utf-8");
+      try { request = JSON.parse(bodyStr); } catch { request = bodyStr; }
+    }
+    writeFileSync(path, JSON.stringify({
+      capturedAt: new Date().toISOString(),
+      label,
+      region: ctx.region,
+      path: ctx.path,
+      requestId: ctx.requestId,
+      request,
+      responseBytes: bytes.byteLength,
+      responseText: new TextDecoder().decode(bytes),
+    }, null, 2));
+    log.info("empty_completion_dump", { id: ctx.requestId, path, label });
+  } catch (err) {
+    log.debug("empty_completion_dump_failed", {
+      id: ctx.requestId,
+      error: err instanceof Error ? err : String(err),
+    });
+  }
 }
 
 /**

@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   fetchWithEmptyRetry,
@@ -283,5 +286,98 @@ describe("retry mode env parsing", () => {
     setLogLevel("info");
     if (saved === undefined) delete process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
     else process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY = saved;
+  });
+});
+
+describe("empty-completion capture (no terminal / non-SSE)", () => {
+  // SSE that opens and closes with no response.completed event — the
+  // "empty stream" variant pi's dashboard reports as 0 chars / 0 tools.
+  function noTerminalEvents() {
+    return ["event: response.created\ndata: {\"foo\":1}\n\n"];
+  }
+  function nonSse200() {
+    return new Response("", { status: 200, headers: { "content-type": "application/json" } });
+  }
+
+  function withDumpDir(fn) {
+    const dir = mkdtempSync(join(tmpdir(), "bm-dump-"));
+    const saved = process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR;
+    process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR = dir;
+    return Promise.resolve(fn(dir)).finally(() => {
+      if (saved === undefined) delete process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR;
+      else process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR = saved;
+      rmSync(dir, { recursive: true, force: true });
+    });
+  }
+
+  test("no-terminal SSE: warns, does NOT retry, attempts=1, body preserved", async () => {
+    setRetryMode(true);
+    setLogLevel("warn");
+    const events = noTerminalEvents();
+    const { result, callCount, stderr } = await captureStderr(async () =>
+      withMockedFetch(
+        [() => sseResponse(events), () => sseResponse(nonEmptyCompletionEvents())],
+        () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+      ),
+    ).then((w) => ({ ...w.result, stderr: w.stderr }));
+    assert.equal(result.attempts, 1, "no-terminal is captured, not retried");
+    assert.equal(callCount, 1);
+    assert.match(stderr, /kind=empty_completion_no_terminal/);
+    assert.equal(await result.response.text(), events.join(""));
+    setRetryMode(undefined);
+    setLogLevel("info");
+  });
+
+  test("no-terminal SSE: dumps buffered bytes + request when EMPTY_DUMP_DIR set", async () => {
+    await withDumpDir(async (dir) => {
+      setRetryMode(true);
+      setLogLevel("silent");
+      const events = noTerminalEvents();
+      await withMockedFetch(
+        [() => sseResponse(events)],
+        () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+      );
+      const files = readdirSync(dir).filter((f) => f.startsWith("no_terminal-"));
+      assert.equal(files.length, 1, "expected one no_terminal dump");
+      const dump = JSON.parse(readFileSync(join(dir, files[0]), "utf-8"));
+      assert.equal(dump.label, "no_terminal");
+      assert.equal(dump.responseText, events.join(""));
+      assert.deepEqual(dump.request, { model: "openai.gpt-5.5", input: [] });
+      setRetryMode(undefined);
+      setLogLevel("info");
+    });
+  });
+
+  test("non-SSE 200: warns + dumps when EMPTY_DUMP_DIR set, passes through", async () => {
+    await withDumpDir(async (dir) => {
+      setRetryMode(true);
+      setLogLevel("silent");
+      const { result, callCount } = await withMockedFetch(
+        [() => nonSse200()],
+        () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+      );
+      assert.equal(result.attempts, 1);
+      assert.equal(callCount, 1);
+      assert.equal(result.response.status, 200);
+      const files = readdirSync(dir).filter((f) => f.startsWith("non_sse-"));
+      assert.equal(files.length, 1, "expected one non_sse dump");
+      setRetryMode(undefined);
+      setLogLevel("info");
+    });
+  });
+
+  test("non-SSE error (500): passes through, no dump", async () => {
+    await withDumpDir(async (dir) => {
+      setRetryMode(true);
+      setLogLevel("silent");
+      const { result } = await withMockedFetch(
+        [() => new Response('{"error":"x"}', { status: 500, headers: { "content-type": "application/json" } })],
+        () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+      );
+      assert.equal(result.response.status, 500);
+      assert.equal(readdirSync(dir).length, 0, "errors must not be dumped");
+      setRetryMode(undefined);
+      setLogLevel("info");
+    });
   });
 });

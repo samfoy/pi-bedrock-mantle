@@ -211,3 +211,23 @@ before forwarding to the client, so streaming "feels" like a single burst on
 latency equal to the full response time. Set the env flag to `0` if you have
 streaming-sensitive consumers that prefer live streaming over the empty-rate
 fix.
+
+### Capturing empty-completion variants (`BEDROCK_MANTLE_EMPTY_DUMP_DIR`)
+
+Not every empty manifests as a `response.completed` with empty output. Two
+other shapes are passed through (not retried) but **captured** for forensics
+when `BEDROCK_MANTLE_EMPTY_DUMP_DIR` is set:
+
+- **`no_terminal`** — a buffered openai-responses SSE stream that closed with
+  no parseable `response.completed` event (logged `kind=empty_completion_no_terminal`).
+- **`non_sse`** — a 200 reply that wasn't `text/event-stream` at all (logged
+  `kind=empty_completion_non_sse`).
+
+```
+BEDROCK_MANTLE_EMPTY_DUMP_DIR=~/.pi/logs/empty-dumps
+```
+
+Each capture writes `<dir>/<label>-<requestId>.json` with the full request
+body and raw response bytes, so the exact shape can be analysed before
+extending retry to cover it. Detected empties (`kind=empty_completion`) are
+also dumped here. Errors (4xx/5xx) are never dumped.
