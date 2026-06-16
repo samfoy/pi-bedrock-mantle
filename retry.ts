@@ -159,6 +159,7 @@ export async function fetchWithEmptyRetry(
         region: ctx.region,
         model: verdict1.model,
         error_code: verdict1.errorCode,
+        error_message: verdict1.errorMessage,
         retryable: false,
       });
       maybeDumpBuffer(ctx, "failed", buffered.bytes, input.body);
@@ -220,7 +221,7 @@ export async function fetchWithEmptyRetry(
  */
 function retryReason(v: BufferedScan): "empty" | "failed" | null {
   if (v.empty) return "empty";
-  if (v.failed && isRetryableFailure(v.errorCode)) return "failed";
+  if (v.failed && isRetryableFailure(v.errorCode, v.errorMessage)) return "failed";
   return null;
 }
 
@@ -253,7 +254,7 @@ function logRetryOutcome(
     const outcome = v2.empty ? "still_empty" : v2.failed ? "still_failed" : "still_no_terminal";
     log.warn(kind, {
       id: ctx.requestId, region: ctx.region, model: v2.model,
-      error_code: v2.errorCode, attempt: 2, outcome,
+      error_code: v2.errorCode, error_message: v2.errorMessage, attempt: 2, outcome,
     });
   }
 }
@@ -347,6 +348,9 @@ type BufferedScan = EmptyCompletionVerdict & {
   found: boolean;
   failed: boolean;
   errorCode?: string;
+  /** Raw error.message from a response.failed event — used to detect infra
+   * failures that surface with a misleading client-error code. */
+  errorMessage?: string;
 };
 
 /**
@@ -369,14 +373,36 @@ const RETRYABLE_FAILED_CODES = new Set([
 ]);
 
 /**
- * A `response.failed` is retryable when its error code is a known transient
- * server-side condition, or when no code is present (ambiguous — one retry is
- * low-harm). Client-side failures (invalid_request_error, content_filter, …)
- * are NOT in the set, so they pass through without a wasted retry.
+ * Substrings in error.message that indicate an infra failure even when the
+ * error.code looks like a client error. Observed: gpt-5.4 returns
+ * `code: "invalid_prompt"` with message containing "Engine not found" when
+ * the model engine is temporarily unavailable — a transient 404 on the
+ * Bedrock routing layer, not a problem with the request.
  */
-function isRetryableFailure(code: string | undefined): boolean {
+const RETRYABLE_MESSAGE_SUBSTRINGS = [
+  "engine not found",
+  "engine bad request",
+  "job registration failed",
+];
+
+/**
+ * A `response.failed` is retryable when:
+ *   - its error code is a known transient server-side condition, or
+ *   - no code is present (ambiguous — one retry is low-harm), or
+ *   - its code looks like a client error but the message contains a known
+ *     infra-failure substring (e.g. `invalid_prompt` + "Engine not found").
+ *
+ * Client-side failures (invalid_request_error, content_filter, …) without
+ * an infra-looking message pass through without a wasted retry.
+ */
+function isRetryableFailure(code: string | undefined, message?: string): boolean {
   if (!code) return true;
-  return RETRYABLE_FAILED_CODES.has(code.toLowerCase());
+  if (RETRYABLE_FAILED_CODES.has(code.toLowerCase())) return true;
+  if (message) {
+    const lc = message.toLowerCase();
+    if (RETRYABLE_MESSAGE_SUBSTRINGS.some((s) => lc.includes(s))) return true;
+  }
+  return false;
 }
 
 /**
@@ -424,8 +450,9 @@ function inspectBufferedSse(text: string): BufferedScan {
         const resp = (parsed.response ?? parsed) as Record<string, unknown>;
         const err = resp.error as Record<string, unknown> | undefined;
         const code = err && typeof err.code === "string" ? err.code : undefined;
+        const message = err && typeof err.message === "string" ? err.message : undefined;
         const model = typeof resp.model === "string" ? resp.model : undefined;
-        return { empty: false, outputItemTypes: [], found: false, failed: true, errorCode: code, model };
+        return { empty: false, outputItemTypes: [], found: false, failed: true, errorCode: code, errorMessage: message, model };
       } catch {
         // Malformed failed event — still a terminal failure, just no code.
         return { empty: false, outputItemTypes: [], found: false, failed: true };

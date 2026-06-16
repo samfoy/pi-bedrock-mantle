@@ -379,3 +379,68 @@ describe("startProxy (legacy)", () => {
     }
   });
 });
+
+describe("image format normalisation", () => {
+  // Helper: intercept signAndForward at the fetch level and capture the body
+  // that was actually sent, without making a real network call.
+  function withBodyCapture(fn) {
+    let capturedBody;
+    const orig = globalThis.fetch;
+    globalThis.fetch = async (_url, init) => {
+      capturedBody = init?.body;
+      return new Response(
+        'event: response.completed\ndata: {}\n\n',
+        { status: 200, headers: { "content-type": "text/event-stream" } }
+      );
+    };
+    return fn().finally(() => { globalThis.fetch = orig; }).then((r) => ({ result: r, capturedBody }));
+  }
+
+  test("data-URL image_url string is rewritten to source block before signing", async () => {
+    const RED = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg==";
+    const body = JSON.stringify({
+      model: "openai.gpt-5.4",
+      stream: true,
+      input: [{ role: "user", content: [
+        { type: "input_image", detail: "auto", image_url: `data:image/png;base64,${RED}` },
+        { type: "input_text", text: "What color?" },
+      ]}],
+    });
+    const { capturedBody } = await withBodyCapture(() =>
+      signAndForward({ method: "POST", path: "/openai/v1/responses", body: Buffer.from(body), region: "us-east-2" })
+    );
+    const sent = JSON.parse(capturedBody.toString());
+    const imgBlock = sent.input[0].content[0];
+    assert.equal(imgBlock.type, "input_image");
+    assert.equal(imgBlock.image_url, undefined, "image_url must be removed");
+    assert.deepEqual(imgBlock.source, { type: "base64", media_type: "image/png", data: RED });
+  });
+
+  test("non-image input blocks pass through unchanged", async () => {
+    const body = JSON.stringify({
+      model: "openai.gpt-5.4",
+      stream: true,
+      input: [{ role: "user", content: [{ type: "input_text", text: "Hello" }] }],
+    });
+    const { capturedBody } = await withBodyCapture(() =>
+      signAndForward({ method: "POST", path: "/openai/v1/responses", body: Buffer.from(body), region: "us-east-2" })
+    );
+    const sent = JSON.parse(capturedBody.toString());
+    assert.deepEqual(sent.input[0].content[0], { type: "input_text", text: "Hello" });
+  });
+
+  test("non-responses paths are not rewritten", async () => {
+    const RED = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg==";
+    const body = JSON.stringify({
+      messages: [{ role: "user", content: [
+        { type: "input_image", image_url: `data:image/png;base64,${RED}` },
+      ]}],
+    });
+    const { capturedBody } = await withBodyCapture(() =>
+      signAndForward({ method: "POST", path: "/v1/chat/completions", body: Buffer.from(body), region: "us-east-2" })
+    );
+    const sent = JSON.parse(capturedBody.toString());
+    // Body must be byte-identical (no rewrite on chat/completions path)
+    assert.equal(sent.messages[0].content[0].image_url, `data:image/png;base64,${RED}`);
+  });
+});
