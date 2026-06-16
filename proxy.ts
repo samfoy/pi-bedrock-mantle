@@ -126,21 +126,95 @@ export interface SignAndForwardInput {
   region: string;
 }
 
+// ─── Image format normalisation ─────────────────────────────────────────────
+
+/**
+ * Pi's openai-responses driver serialises images returned by the `read` tool
+ * as `{ type: "input_image", image_url: "data:<mime>;base64,<data>", detail: "auto" }`
+ * (a plain data-URL string). Bedrock Mantle's Responses API rejects this with
+ * HTTP 400 "Invalid or unsupported image format" — it expects the source-block
+ * form `{ type: "input_image", source: { type: "base64", media_type: "...", data: "..." } }`.
+ *
+ * This function rewrites any `input_image` item whose `image_url` field is a
+ * data-URL string into the source-block form. All other items pass through
+ * unchanged.
+ */
+function normalisedBody(buf: Buffer, path: string): Buffer {
+  // Only applies to openai/v1/responses — other paths (chat/completions,
+  // anthropic/messages, health checks) don't carry input_image blocks.
+  if (!/^\/openai\/v1\/responses(\?|$|\/)/.test(path)) return buf;
+  if (buf.length === 0) return buf;
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(buf.toString("utf-8")) as Record<string, unknown>;
+  } catch {
+    return buf; // not JSON — pass through unchanged
+  }
+
+  let dirty = false;
+
+  function rewriteContent(content: unknown): unknown {
+    if (!Array.isArray(content)) return content;
+    return content.map((item: unknown) => {
+      if (!item || typeof item !== "object") return item;
+      const block = item as Record<string, unknown>;
+      if (block.type !== "input_image") return block;
+      const url = block.image_url;
+      if (typeof url !== "string" || !url.startsWith("data:")) return block;
+
+      // Parse data URL: data:<mediaType>[;base64],<data>
+      const comma = url.indexOf(",");
+      if (comma === -1) return block;
+      const meta = url.slice(5, comma); // strip "data:"
+      const b64 = url.slice(comma + 1);
+      const mediaType = meta.endsWith(";base64") ? meta.slice(0, -7) : "application/octet-stream";
+
+      dirty = true;
+      const { image_url: _drop, ...rest } = block;
+      void _drop;
+      return {
+        ...rest,
+        source: { type: "base64", media_type: mediaType, data: b64 },
+      };
+    });
+  }
+
+  function rewriteInput(input: unknown): unknown {
+    if (!Array.isArray(input)) return input;
+    return input.map((item: unknown) => {
+      if (!item || typeof item !== "object") return item;
+      const msg = item as Record<string, unknown>;
+      if (!Array.isArray(msg.content)) return msg;
+      const newContent = rewriteContent(msg.content);
+      if (newContent === msg.content) return msg;
+      return { ...msg, content: newContent };
+    });
+  }
+
+  const newInput = rewriteInput(parsed.input);
+  if (!dirty) return buf;
+  return Buffer.from(JSON.stringify({ ...parsed, input: newInput }), "utf-8");
+}
+
 /**
  * Sign and forward a single request to bedrock-mantle, returning the upstream
  * `Response` for the caller to consume (status, headers, streaming body).
  *
  * The returned `Response.body` is a `ReadableStream` — callers should read it
- * directly to preserve streaming semantics (no buffering for SSE responses).
+ * directly to preserve streaming preserves (no buffering for SSE responses).
  */
 export async function signAndForward(input: SignAndForwardInput): Promise<Response> {
   const { method = "POST", path, headers = {}, body, region } = input;
   const host = `bedrock-mantle.${region}.api.aws`;
   const target = `https://${host}${path}`;
 
-  const bodyBuf = typeof body === "string"
+  // Normalise image blocks before signing: pi sends input_image with a data-URL
+  // string in image_url; Bedrock Mantle requires the source-block form instead.
+  const rawBuf = typeof body === "string"
     ? Buffer.from(body, "utf-8")
     : body ?? Buffer.alloc(0);
+  const bodyBuf = normalisedBody(rawBuf, path);
 
   // Build the header set to sign. host + content-type are always present;
   // x-* / anthropic-* pass through verbatim.

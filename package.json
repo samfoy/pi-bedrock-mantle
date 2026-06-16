@@ -21,24 +21,19 @@
   },
   "type": "module",
   "scripts": {
-    "clean": "rm -rf .tmp-test",
-    "build": "echo 'nothing to build'",
+    "clean": "rm -rf dist .tmp-test",
+    "build": "npm run clean && tsc --noEmit false --outDir dist --rootDir .",
     "check": "tsc --noEmit",
-    "test": "rm -rf .tmp-test && tsc --noEmit false --outDir .tmp-test && BEDROCK_MANTLE_LOG_FILE= BEDROCK_MANTLE_EMPTY_DUMP_DIR= node --test test/*.test.mjs"
+    "test": "rm -rf .tmp-test && tsc --noEmit false --outDir .tmp-test --rootDir . && BEDROCK_MANTLE_LOG_FILE= BEDROCK_MANTLE_EMPTY_DUMP_DIR= node --test test/*.test.mjs"
   },
   "files": [
-    "index.ts",
-    "proxy.ts",
-    "models.ts",
-    "log.ts",
-    "empty-completion.ts",
-    "retry.ts",
+    "dist",
     "README.md",
     "LICENSE"
   ],
   "pi": {
     "extensions": [
-      "./index.ts"
+      "./dist/index.js"
     ]
   },
   "dependencies": {

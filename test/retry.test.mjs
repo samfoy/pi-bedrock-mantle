@@ -465,6 +465,40 @@ describe("transient response.failed retry", () => {
     setLogLevel("info");
   });
 
+  test("invalid_prompt + 'Engine not found' message: treated as infra failure, retried once", async () => {
+    setRetryMode(true);
+    setLogLevel("silent");
+    const engineNotFound = [
+      "event: response.created\ndata: {\"foo\":1}\n\n",
+      `event: response.failed\ndata: {"response":{"model":"openai.gpt-5.4","status":"failed","error":{"code":"invalid_prompt","message":"JSON-RPC error -32602: Job registration failed: Engine bad request: Task submission failed with status 404 Not Found: Engine not found"}}}\n\n`,
+    ];
+    const { result, callCount } = await withMockedFetch(
+      [() => sseResponse(engineNotFound), () => sseResponse(nonEmptyCompletionEvents())],
+      () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+    );
+    assert.equal(result.attempts, 2, "infra failures surfaced as invalid_prompt must be retried");
+    assert.equal(callCount, 2);
+    setRetryMode(undefined);
+    setLogLevel("info");
+  });
+
+  test("invalid_prompt WITHOUT infra message: NOT retried", async () => {
+    setRetryMode(true);
+    setLogLevel("silent");
+    const realClientError = [
+      "event: response.created\ndata: {\"foo\":1}\n\n",
+      `event: response.failed\ndata: {"response":{"model":"openai.gpt-5.4","status":"failed","error":{"code":"invalid_prompt","message":"Your request contains an invalid prompt."}}}\n\n`,
+    ];
+    const { result, callCount } = await withMockedFetch(
+      [() => sseResponse(realClientError), () => sseResponse(nonEmptyCompletionEvents())],
+      () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+    );
+    assert.equal(result.attempts, 1, "plain invalid_prompt without infra message must not be retried");
+    assert.equal(callCount, 1);
+    setRetryMode(undefined);
+    setLogLevel("info");
+  });
+
   test("response.failed with no error code: treated as transient, retried once", async () => {
     setRetryMode(true);
     setLogLevel("silent");
