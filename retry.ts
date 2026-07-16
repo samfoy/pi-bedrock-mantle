@@ -60,40 +60,56 @@ export interface RetryResult {
   attempts: number;
 }
 
-/** Test/operator hook: override the active retry mode. Returns prior value. */
-let retryOverride: boolean | undefined;
-export function setRetryMode(enabled: boolean | undefined): void {
-  retryOverride = enabled;
+/** Test/operator hook: override the active retry mode. Accepts the legacy
+ * boolean form (true → buffer retry on, false → off) or an explicit mode
+ * string. Pass undefined to clear and fall back to env / default. */
+export type RetryMode = "stream" | "buffer" | "off";
+let retryOverride: RetryMode | undefined;
+export function setRetryMode(mode: boolean | RetryMode | undefined): void {
+  if (mode === undefined) retryOverride = undefined;
+  else if (mode === true) retryOverride = "buffer";
+  else if (mode === false) retryOverride = "off";
+  else retryOverride = mode;
 }
 
 /**
- * Parse the env override into a tri-state:
- *   true  → force on
- *   false → force off
- *   undefined → no explicit override (fall back to default: on)
+ * Parse the env override into a mode, or undefined when unset/empty:
+ *   1/true/yes/on/stream → "stream"  (retry WITH live streaming; default)
+ *   buffer/full          → "buffer"  (retry with full end-to-end buffering)
+ *   0/false/no/off       → "off"     (no retry, pure pass-through)
  */
-function envRetryOverride(): boolean | undefined {
+function envRetryMode(): RetryMode | undefined {
   const raw = process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
   if (raw === undefined || raw === "") return undefined;
   const lower = raw.toLowerCase();
-  if (lower === "1" || lower === "true" || lower === "yes" || lower === "on") return true;
-  if (lower === "0" || lower === "false" || lower === "no" || lower === "off") return false;
+  if (lower === "0" || lower === "false" || lower === "no" || lower === "off") return "off";
+  if (lower === "buffer" || lower === "full" || lower === "buffered") return "buffer";
+  if (lower === "1" || lower === "true" || lower === "yes" || lower === "on" || lower === "stream") return "stream";
   return undefined;
 }
 
 /**
- * Decide whether buffer-and-retry should engage for openai-responses traffic.
+ * Resolve the active retry mode for openai-responses traffic.
  *
  * Precedence:
  *   1. setRetryMode() test/operator hook (wins outright)
- *   2. BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY env override (on/off)
- *   3. default: on
+ *   2. BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY env override
+ *   3. default: "stream"  (retry, streaming-preserving)
+ */
+export function retryMode(): RetryMode {
+  if (retryOverride !== undefined) return retryOverride;
+  const env = envRetryMode();
+  if (env !== undefined) return env;
+  return "stream";
+}
+
+/**
+ * Back-compat: any retry mode other than "off". ``fetchWithEmptyRetry``
+ * (buffer path) still gates on this, so the legacy boolean semantics —
+ * on/off — are preserved for callers and tests that exercise it directly.
  */
 function retryEnabled(): boolean {
-  if (retryOverride !== undefined) return retryOverride;
-  const env = envRetryOverride();
-  if (env !== undefined) return env;
-  return true;
+  return retryMode() !== "off";
 }
 
 function isOpenAIResponsesPath(path: string): boolean {
@@ -212,6 +228,204 @@ export async function fetchWithEmptyRetry(
   }
 
   return { response: rebuildResponse(second, buffered2.bytes), attempts: 2 };
+}
+
+// ─── Streaming-preserving retry (default mode) ──────────────────────────────
+
+/**
+ * Decide, from a single SSE event, whether the turn has committed to
+ * actionable output (real message text, a tool/function call, or the deltas
+ * that stream them). Once committed, the response is definitively NOT an empty
+ * completion and must be streamed live.
+ */
+function eventIsActionable(eventType: string | null, data: string): boolean {
+  if (!eventType) return false;
+  if (
+    eventType === "response.output_text.delta" ||
+    eventType === "response.function_call_arguments.delta" ||
+    eventType === "response.content_part.added"
+  ) {
+    return true;
+  }
+  if (eventType === "response.output_item.added") {
+    if (!data || data === "[DONE]") return false;
+    try {
+      const item = (JSON.parse(data) as Record<string, unknown>).item as
+        | Record<string, unknown>
+        | undefined;
+      const t = item && typeof item.type === "string" ? item.type : "";
+      // A reasoning item is NOT actionable — the empty completion emits
+      // reasoning then stops. Only message / *_call commit to output.
+      return t === "message" || t.endsWith("_call") || t === "mcp_approval_request";
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+/**
+ * Streaming-preserving retry for openai-responses SSE.
+ *
+ * Holds back only the head events (response.created / in_progress / leading
+ * reasoning). The instant the turn commits to actionable output, the held head
+ * is flushed and the rest of the upstream streams through byte-for-byte —
+ * preserving live token streaming. If the stream ends having produced nothing
+ * actionable (empty completion) or a transient response.failed, and nothing
+ * has been sent to the client yet, the identical request is re-issued once.
+ *
+ * Contrast with ``fetchWithEmptyRetry`` (buffer mode): that buffers the whole
+ * SSE before forwarding, so pi sees a single burst. Buffer mode can retry a
+ * transient failure that arrives AFTER a complete function_call; stream mode
+ * cannot (those bytes are already sent). Empty completions produce no
+ * actionable event, so they are always recoverable in stream mode.
+ */
+export async function fetchWithStreamingRetry(
+  input: SignAndForwardInput,
+  ctx: RetryContext,
+): Promise<RetryResult> {
+  // Only the openai-responses SSE path is in scope; everything else is a
+  // straight pass-through (same contract as fetchWithEmptyRetry).
+  if (!isOpenAIResponsesPath(ctx.path)) {
+    return { response: await signAndForward(input), attempts: 1 };
+  }
+
+  const first = await signAndForward(input);
+  const ct = (first.headers.get("content-type") ?? "").toLowerCase();
+  if (!ct.includes("text/event-stream") || !first.body) {
+    // Non-SSE (error / plain JSON) — pass through live, no retry.
+    return { response: first, attempts: 1 };
+  }
+
+  const decoder = new TextDecoder();
+
+  // We report attempts=2 if a retry fires; pi only reads attempts for logging,
+  // so 1 is a safe initial value and the stream bumps it when a retry occurs.
+  const result: RetryResult = { response: undefined as unknown as Response, attempts: 1 };
+
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      let upstream = first;
+      let attempt = 1;
+
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const reader = upstream.body!.getReader();
+        let committed = false;
+        const held: Uint8Array[] = [];
+        let sseBuf = "";
+
+        const flushHead = () => {
+          for (const chunk of held) controller.enqueue(chunk);
+          held.length = 0;
+        };
+
+        try {
+          // eslint-disable-next-line no-constant-condition
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (committed) {
+              controller.enqueue(value);
+              continue;
+            }
+            held.push(value);
+            sseBuf += decoder.decode(value, { stream: true });
+            // Scan complete events accumulated so far. Once one is actionable,
+            // flush everything held and switch to live pass-through.
+            let cursor = 0;
+            while (true) {
+              const sep = sseBuf.indexOf("\n\n", cursor);
+              if (sep === -1) break;
+              const block = sseBuf.slice(cursor, sep);
+              cursor = sep + 2;
+              let et: string | null = null;
+              const dataLines: string[] = [];
+              for (const raw of block.split("\n")) {
+                const line = raw.replace(/\r$/, "");
+                if (line.startsWith("event:")) et = line.slice(6).trim();
+                else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+              }
+              if (eventIsActionable(et, dataLines.join("\n"))) {
+                committed = true;
+                break;
+              }
+            }
+            if (committed) flushHead();
+          }
+        } finally {
+          reader.releaseLock();
+        }
+
+        if (committed) {
+          // Happy path — head + live stream already delivered.
+          result.attempts = attempt;
+          controller.close();
+          return;
+        }
+
+        // Never committed → inspect the held bytes for empty / transient-fail.
+        const verdict = inspectBufferedSse(decoder.decode(concat(held)));
+        const reason = retryReason(verdict);
+        if (reason && attempt === 1) {
+          logRetryAttempt1(ctx, reason, verdict);
+          attempt = 2;
+          const second = await signAndForward(input);
+          const ct2 = (second.headers.get("content-type") ?? "").toLowerCase();
+          if (!ct2.includes("text/event-stream") || !second.body) {
+            // Retry surface changed — forward whatever we got, verbatim.
+            const buf = new Uint8Array(await second.arrayBuffer());
+            controller.enqueue(buf);
+            result.attempts = 2;
+            controller.close();
+            return;
+          }
+          upstream = second;
+          continue; // re-enter the loop for the retried stream
+        }
+
+        // No retry (or retry exhausted): flush the held bytes verbatim.
+        logRetryOutcomeStream(ctx, reason, verdict, attempt);
+        flushHead();
+        result.attempts = attempt;
+        controller.close();
+        return;
+      }
+    },
+  });
+
+  // Preserve upstream status/headers; the body is our managed stream.
+  result.response = new Response(stream, {
+    status: first.status,
+    statusText: first.statusText,
+    headers: first.headers,
+  });
+  return result;
+}
+
+function concat(chunks: Uint8Array[]): Uint8Array {
+  const total = chunks.reduce((a, c) => a + c.byteLength, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.byteLength; }
+  return out;
+}
+
+function logRetryOutcomeStream(
+  ctx: RetryContext,
+  reason: "empty" | "failed" | null,
+  v: BufferedScan,
+  attempt: number,
+): void {
+  if (attempt < 2) return; // no retry happened — nothing to log
+  const kind = reason === "failed" ? "upstream_failed_retry" : "empty_completion_retry";
+  const recovered = v.found && !v.empty;
+  if (recovered) {
+    log.info(kind, { id: ctx.requestId, region: ctx.region, model: v.model, attempt: 2, outcome: "recovered" });
+  } else {
+    const outcome = v.empty ? "still_empty" : v.failed ? "still_failed" : "still_no_terminal";
+    log.warn(kind, { id: ctx.requestId, region: ctx.region, model: v.model, attempt: 2, outcome });
+  }
 }
 
 /**

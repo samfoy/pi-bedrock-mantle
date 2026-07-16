@@ -178,39 +178,47 @@ observability only, never a transformation. Pi (or operators reading the
 log) can decide whether to retry, surface the error to the user, or adjust
 the reasoning-effort knob.
 
-### Empty-completion retry (on by default)
+### Empty-completion retry (streaming-preserving, on by default)
 
-The proxy buffers `/openai/v1/responses` SSE responses end-to-end and retries
-once when the first attempt is empty. Empirically takes the user-visible empty
-rate from ~10–20% to ~1–2%. One retry max — no infinite loop.
+The proxy retries a `/openai/v1/responses` request once when the first attempt
+is an empty completion (or a transient `response.failed`). Empirically takes the
+user-visible empty rate from ~10–20% to ~1–2%. One retry max — no infinite loop.
 
-**On by default for all openai-responses traffic.** Non-empty responses pass
-through after a single attempt, so the only cost on the happy path is
-end-to-end buffering of that one response.
+Three modes, via `BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY`:
 
-Override per deployment with `BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY`:
+| Value | Mode | Streaming? | Retry? |
+|-------|------|-----------|--------|
+| unset / `stream` / `1` / `on` | **stream (default)** | ✅ live | ✅ empty + transient-fail, *before* any content |
+| `buffer` / `full` | buffer | ❌ one burst | ✅ empty + transient-fail, even after a complete function_call |
+| `0` / `false` / `off` | off | ✅ live | ❌ |
 
-| Value | Effect |
-|-------|--------|
-| unset (default) | retry **on** |
-| `1` / `true` / `on` | explicitly force retry **on** |
-| `0` / `false` / `off` | force retry **off** (live streaming, no buffering) |
+**stream mode (default)** holds back only the head events (`response.created`,
+`response.in_progress`, and any leading `reasoning` item — a few hundred bytes).
+The instant the turn commits to actionable output (a `message` item, any
+`*_call`, or a text/argument delta), it flushes the head and streams the rest
+live. An empty completion never emits an actionable event, so it's caught with
+nothing sent to the client and retried. Measured on gpt-5.5: first-byte ~2s with
+tokens streaming over wall-clock, vs. buffer mode's ~15s stall-then-burst for
+the same response.
 
-Log lines on retry:
+**buffer mode** buffers the entire SSE end-to-end before forwarding (pi sees a
+single burst). Slightly more robust: it can also retry a transient
+`response.failed` that arrives *after* a complete function_call, which stream
+mode cannot (those bytes are already sent). Use it only if you'd rather have max
+reliability than streaming.
+
+**Tradeoff of stream mode:** a transient `response.failed` that surfaces *after*
+content has already streamed can't be retried (the client has the bytes). Empty
+completions are always recoverable since they emit no content. Switch to
+`buffer` if you hit frequent post-content transient failures.
+
+Log lines on retry (both modes):
 
 ```
 [bedrock-mantle] level=warn kind=empty_completion_retry id=… attempt=1 action=retrying
 [bedrock-mantle] level=info kind=empty_completion_retry id=… attempt=2 outcome=recovered
 [bedrock-mantle] level=warn kind=empty_completion_retry id=… attempt=2 outcome=still_empty   # rare
 ```
-
-Tradeoff: when retry engages it buffers the entire SSE response in memory
-before forwarding to the client, so streaming "feels" like a single burst on
-`/openai/v1/responses` traffic. For tool-call-only first turns this is ~free
-(responses are small, < 200KB); for long visible-text responses it adds
-latency equal to the full response time. Set the env flag to `0` if you have
-streaming-sensitive consumers that prefer live streaming over the empty-rate
-fix.
 
 ### Capturing empty-completion variants (`BEDROCK_MANTLE_EMPTY_DUMP_DIR`)
 

@@ -52,7 +52,20 @@ export interface RetryResult {
     /** 1 if no retry was attempted (or retry mode off), 2 if a retry fired. */
     attempts: number;
 }
-export declare function setRetryMode(enabled: boolean | undefined): void;
+/** Test/operator hook: override the active retry mode. Accepts the legacy
+ * boolean form (true → buffer retry on, false → off) or an explicit mode
+ * string. Pass undefined to clear and fall back to env / default. */
+export type RetryMode = "stream" | "buffer" | "off";
+export declare function setRetryMode(mode: boolean | RetryMode | undefined): void;
+/**
+ * Resolve the active retry mode for openai-responses traffic.
+ *
+ * Precedence:
+ *   1. setRetryMode() test/operator hook (wins outright)
+ *   2. BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY env override
+ *   3. default: "stream"  (retry, streaming-preserving)
+ */
+export declare function retryMode(): RetryMode;
 /**
  * Sign + forward a single request, with optional buffer-and-retry on
  * empty-completion failures from gpt-5.x via openai-responses.
@@ -62,3 +75,20 @@ export declare function setRetryMode(enabled: boolean | undefined): void;
  * returns `attempts: 1`.
  */
 export declare function fetchWithEmptyRetry(input: SignAndForwardInput, ctx: RetryContext): Promise<RetryResult>;
+/**
+ * Streaming-preserving retry for openai-responses SSE.
+ *
+ * Holds back only the head events (response.created / in_progress / leading
+ * reasoning). The instant the turn commits to actionable output, the held head
+ * is flushed and the rest of the upstream streams through byte-for-byte —
+ * preserving live token streaming. If the stream ends having produced nothing
+ * actionable (empty completion) or a transient response.failed, and nothing
+ * has been sent to the client yet, the identical request is re-issued once.
+ *
+ * Contrast with ``fetchWithEmptyRetry`` (buffer mode): that buffers the whole
+ * SSE before forwarding, so pi sees a single burst. Buffer mode can retry a
+ * transient failure that arrives AFTER a complete function_call; stream mode
+ * cannot (those bytes are already sent). Empty completions produce no
+ * actionable event, so they are always recoverable in stream mode.
+ */
+export declare function fetchWithStreamingRetry(input: SignAndForwardInput, ctx: RetryContext): Promise<RetryResult>;
