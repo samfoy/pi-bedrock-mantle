@@ -25,7 +25,7 @@ import { fromIni, fromNodeProviderChain } from "@aws-sdk/credential-providers";
 import { SignatureV4 } from "@smithy/signature-v4";
 import { log, newRequestId } from "./log.js";
 import { maybeDetectEmptyCompletion } from "./empty-completion.js";
-import { fetchWithEmptyRetry } from "./retry.js";
+import { fetchWithEmptyRetry, fetchWithStreamingRetry, retryMode } from "./retry.js";
 // ─── Port parsing (kept for backward compat with pinned env overrides) ──────
 export function parsePortEnv(name, defaultPort) {
     const raw = process.env[name];
@@ -252,18 +252,30 @@ function makeHandler(region) {
                 chunks.push(chunk);
             const bodyBuf = Buffer.concat(chunks);
             bytesIn = bodyBuf.length;
-            // 2. Sign and forward via the in-process surface, with buffer-and-retry
-            //    on empty completions for the openai-responses path. On by default;
-            //    override globally with BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY
-            //    (0=force off, 1=force on). A no-op pass-through for
-            //    non-openai-responses paths.
-            const { response: rawUpstream, attempts } = await fetchWithEmptyRetry({
-                method: req.method ?? "POST",
-                path: req.url ?? "/",
-                headers: req.headers,
-                body: bodyBuf,
-                region,
-            }, { requestId: reqId, region, path: req.url ?? "/" });
+            // 2. Sign and forward via the in-process surface. On the openai-responses
+            //    path, apply empty-completion / transient-failure retry per the
+            //    active mode (BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY):
+            //      stream (default) → hold only the head, then stream live; retry
+            //                         once only if the turn never commits to output.
+            //      buffer           → full end-to-end buffering + retry (no stream).
+            //      off              → pure pass-through, no retry.
+            //    All three are no-ops for non-openai-responses paths.
+            const useStreaming = retryMode() === "stream";
+            const { response: rawUpstream, attempts } = useStreaming
+                ? await fetchWithStreamingRetry({
+                    method: req.method ?? "POST",
+                    path: req.url ?? "/",
+                    headers: req.headers,
+                    body: bodyBuf,
+                    region,
+                }, { requestId: reqId, region, path: req.url ?? "/" })
+                : await fetchWithEmptyRetry({
+                    method: req.method ?? "POST",
+                    path: req.url ?? "/",
+                    headers: req.headers,
+                    body: bodyBuf,
+                    region,
+                }, { requestId: reqId, region, path: req.url ?? "/" });
             // 2a. Wrap with the empty-completion detector for openai-responses SSE.
             // No-ops for any other path/content-type, so this is safe to apply
             // unconditionally. dispose() must be called when the client stream
