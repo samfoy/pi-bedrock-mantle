@@ -211,6 +211,10 @@ const KNOWN: Record<string, ModelSpec> = {
   // OpenAI GPT-5 — us-east-2 only
   "openai.gpt-5.5":              { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { off: null, xhigh: "xhigh" } },
   "openai.gpt-5.5-2026-04-23":   { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { off: null, xhigh: "xhigh" } },
+  // Context windows increased to 1M: https://aws.amazon.com/about-aws/whats-new/2026/08/gpt-sol-terra-luna-long-context-bedrock/
+  "openai.gpt-5.6-luna":         { contextWindow: 1000000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { off: null, xhigh: "xhigh" } },
+  "openai.gpt-5.6-sol":          { contextWindow: 1000000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { off: null, xhigh: "xhigh" } },
+  "openai.gpt-5.6-terra":        { contextWindow: 1000000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { off: null, xhigh: "xhigh" } },
   "openai.gpt-5.4":              { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { off: null, xhigh: "xhigh" } },
   "openai.gpt-5.4-2026-03-05":   { contextWindow: 272000, maxTokens: 128000, reasoning: true,  input: ["text", "image"], thinkingLevelMap: { off: null, xhigh: "xhigh" } },
   // OpenAI OSS

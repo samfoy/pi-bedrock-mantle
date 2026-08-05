@@ -67,13 +67,22 @@ async function withMutedWarnings(fn) {
 }
 
 test("GPT-5 models route through OpenAI Responses with image input and GPT-5 thinking map", () => {
-  for (const id of ["openai.gpt-5.5", "openai.gpt-5.5-2026-04-23", "openai.gpt-5.4"]) {
+  for (const id of [
+    "openai.gpt-5.5",
+    "openai.gpt-5.5-2026-04-23",
+    "openai.gpt-5.4",
+    "openai.gpt-5.6-luna",
+    "openai.gpt-5.6-sol",
+    "openai.gpt-5.6-terra",
+  ]) {
     const model = fallbackById(id);
     assert.equal(model.api, "openai-responses");
     assert.match(model.baseUrl ?? "", /^http:\/\/127\.0\.0\.1:\d+\/openai\/v1$/);
     assert.deepEqual(model.input, ["text", "image"]);
     assert.equal(model.reasoning, true);
     assert.deepEqual(model.thinkingLevelMap, { off: null, xhigh: "xhigh" });
+    assert.equal(model.contextWindow, id.includes("gpt-5.6-") ? 1000000 : 272000);
+    assert.equal(model.maxTokens, 128000);
   }
 });
 
