@@ -1,7 +1,7 @@
 /**
  * Model spec registry and live discovery for bedrock-mantle.
  *
- * Queries both us-east-1 and us-east-2 in parallel and merges the results.
+ * Queries us-east-1, us-east-2, and us-west-2 in parallel and merges the results.
  * Each model is assigned the correct API type and proxy baseUrl:
  *
  *   - Anthropic models (us-east-1 only):
@@ -9,7 +9,7 @@
  *       baseUrl: http://localhost:57891/anthropic   (pi appends /v1/messages)
  *       headers: { anthropic-version: "2023-06-01" }
  *
- *   - GPT-5.x models:
+ *   - GPT-5.x and GPT-6 Astra models:
  *       api: "openai-responses"
  *       baseUrl: http://localhost:57893/openai/v1   (pi appends /responses)
  *
@@ -17,7 +17,7 @@
  *       api: "openai-completions"
  *       baseUrl: http://localhost:57893/v1          (pi appends /chat/completions)
  *
- *   OpenAI-compatible route preference is us-east-2 when available, with
+ *   OpenAI-compatible route preference is us-east-2, then us-west-2, with
  *   fallback to us-east-1 for models only available there.
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -27,11 +27,12 @@ import { Sha256 } from "@aws-crypto/sha256-js";
 import { fromIni, fromNodeProviderChain } from "@aws-sdk/credential-providers";
 import { SignatureV4 } from "@smithy/signature-v4";
 import { log } from "./log.js";
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const CACHE_ENV = "BEDROCK_MANTLE_MODEL_CACHE";
 const CMH_PLACEHOLDER = "{{CMH_PORT}}";
 const IAD_PLACEHOLDER = "{{IAD_PORT}}";
+const PDX_PLACEHOLDER = "{{PDX_PORT}}";
 /**
  * The pinned ports requested via env (0 = ephemeral). Used as the cache-key
  * dimension so a cache written when the user pinned ports doesn't get reused
@@ -42,6 +43,7 @@ function requestedPorts() {
     return {
         cmh: Number(process.env.BEDROCK_MANTLE_PROXY_PORT_CMH ?? 0) || 0,
         iad: Number(process.env.BEDROCK_MANTLE_PROXY_PORT_IAD ?? 0) || 0,
+        pdx: Number(process.env.BEDROCK_MANTLE_PROXY_PORT_PDX ?? 0) || 0,
     };
 }
 function cachePath() {
@@ -91,7 +93,8 @@ function applyPorts(models, ports) {
             return m;
         const baseUrl = m.baseUrl
             .replace(CMH_PLACEHOLDER, String(ports.cmh))
-            .replace(IAD_PLACEHOLDER, String(ports.iad));
+            .replace(IAD_PLACEHOLDER, String(ports.iad))
+            .replace(PDX_PLACEHOLDER, String(ports.pdx));
         return { ...m, baseUrl };
     });
 }
@@ -119,21 +122,33 @@ export function readCachedModels(ports, options = {}) {
     const raw = readRawCachedModels(options);
     return raw ? applyPorts(raw, ports) : null;
 }
-export function writeCachedModels(models) {
+export function writeCachedModels(models, ports) {
+    const placeholders = [
+        [String(ports.cmh), CMH_PLACEHOLDER],
+        [String(ports.iad), IAD_PLACEHOLDER],
+        [String(ports.pdx), PDX_PLACEHOLDER],
+    ];
+    const sanitized = [];
+    for (const model of models) {
+        if (!model.baseUrl) {
+            sanitized.push(model);
+            continue;
+        }
+        const portMatch = model.baseUrl.match(/(127\.0\.0\.1:)(\d+)/);
+        if (!portMatch) {
+            sanitized.push(model);
+            continue;
+        }
+        const matches = placeholders.filter(([port]) => port === portMatch[2]);
+        if (matches.length !== 1)
+            return;
+        sanitized.push({
+            ...model,
+            baseUrl: model.baseUrl.replace(portMatch[0], `${portMatch[1]}${matches[0][1]}`),
+        });
+    }
     const path = cachePath();
     mkdirSync(dirname(path), { recursive: true });
-    // Strip the bound ports out of baseUrls before persisting — bound ports
-    // change every run when ephemeral, but the routing logic (which port goes
-    // with which region/api) is stable.
-    const sanitized = models.map((m) => {
-        if (!m.baseUrl)
-            return m;
-        const isAnthropic = m.api === "anthropic-messages";
-        const placeholder = isAnthropic ? IAD_PLACEHOLDER : CMH_PLACEHOLDER;
-        // Replace any 1-5-digit port immediately after `127.0.0.1:` with the placeholder.
-        const baseUrl = m.baseUrl.replace(/(127\.0\.0\.1:)\d+/, `$1${placeholder}`);
-        return { ...m, baseUrl };
-    });
     const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
     writeFileSync(tmp, JSON.stringify({
         version: CACHE_VERSION,
@@ -151,9 +166,11 @@ export function fastModels(ports) {
         ?? readCachedModels(ports)
         ?? applyPorts(FALLBACK_MODELS_RAW, ports);
 }
+const ASTRA_MODEL_ID = "openai.gpt-6-astra";
 const KNOWN = {
     // OpenAI GPT-5 — us-east-2 only
     "openai.gpt-5.5": { contextWindow: 272000, maxTokens: 128000, reasoning: true, input: ["text", "image"], thinkingLevelMap: { off: null, xhigh: "xhigh" } },
+    [ASTRA_MODEL_ID]: { contextWindow: 1050000, maxTokens: 128000, reasoning: true, input: ["text", "image"], thinkingLevelMap: { off: null, xhigh: "xhigh" } },
     "openai.gpt-5.5-2026-04-23": { contextWindow: 272000, maxTokens: 128000, reasoning: true, input: ["text", "image"], thinkingLevelMap: { off: null, xhigh: "xhigh" } },
     // Context windows increased to 1M: https://aws.amazon.com/about-aws/whats-new/2026/08/gpt-sol-terra-luna-long-context-bedrock/
     "openai.gpt-5.6-luna": { contextWindow: 1000000, maxTokens: 128000, reasoning: true, input: ["text", "image"], thinkingLevelMap: { off: null, xhigh: "xhigh" } },
@@ -243,9 +260,7 @@ function displayName(id) {
 // anthropic.*                          → anthropic-messages on us-east-1
 // everything else                      → openai-completions  on us-east-2 (or us-east-1 fallback)
 function isOpenAIResponses(id) {
-    // Only the GPT-5 family uses the Responses API — gpt-oss-* and all other
-    // providers use the Chat Completions API instead.
-    return /^openai\.gpt-5\./.test(id);
+    return /^openai\.gpt-(?:5|6)[.-]/.test(id);
 }
 /**
  * Build a model config with placeholder baseUrls. The placeholder port is
@@ -270,9 +285,13 @@ function buildConfig(id, regions) {
             headers: { "anthropic-version": "2023-06-01" },
         };
     }
-    const placeholder = regions.has("us-east-2") ? CMH_PLACEHOLDER : IAD_PLACEHOLDER;
+    const placeholder = regions.has("us-east-2")
+        ? CMH_PLACEHOLDER
+        : regions.has("us-west-2")
+            ? PDX_PLACEHOLDER
+            : IAD_PLACEHOLDER;
     if (isOpenAIResponses(id)) {
-        // GPT-5.x family: uses the OpenAI Responses API.
+        // GPT-5.x and GPT-6 Astra use the OpenAI Responses API.
         return {
             ...base,
             api: "openai-responses",
@@ -288,7 +307,7 @@ function buildConfig(id, regions) {
     };
 }
 // ─── Live discovery ───────────────────────────────────────────────────────────
-const REGIONS = ["us-east-1", "us-east-2"];
+const REGIONS = ["us-east-1", "us-east-2", "us-west-2"];
 async function fetchRegionModels(region) {
     const host = `bedrock-mantle.${region}.api.aws`;
     const profile = process.env.BEDROCK_MANTLE_AWS_PROFILE;
@@ -343,7 +362,7 @@ export async function discoverModels(ports) {
 export async function fetchModels(ports) {
     try {
         const models = await discoverModels(ports);
-        writeCachedModels(models);
+        writeCachedModels(models, ports);
         return models;
     }
     catch (err) {
@@ -361,7 +380,11 @@ export async function fetchModels(ports) {
  * to substitute actual bound ports before passing to pi.
  */
 export const FALLBACK_MODELS_RAW = Object.keys(KNOWN).map((id) => {
-    const regions = new Set(ANTHROPIC_IDS.has(id) ? ["us-east-1"] : ["us-east-2"]);
+    const regions = new Set(ANTHROPIC_IDS.has(id)
+        ? ["us-east-1"]
+        : id === ASTRA_MODEL_ID
+            ? ["us-west-2"]
+            : ["us-east-2"]);
     return buildConfig(id, regions);
 });
 /**

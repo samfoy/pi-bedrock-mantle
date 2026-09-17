@@ -1,6 +1,6 @@
 # pi-bedrock-mantle
 
-Pi extension: all [Amazon Bedrock Mantle](https://bedrock-mantle.us-east-2.api.aws) models (GPT-5.5, DeepSeek, Qwen3, Mistral, Kimi, and more) with **SigV4 auth** — no long-term API key needed.
+Pi extension: all [Amazon Bedrock Mantle](https://bedrock-mantle.us-east-2.api.aws) models (GPT-6 Astra, GPT-5.6, GPT-5.5, DeepSeek, Qwen3, Mistral, Kimi, and more) with **SigV4 auth** — no long-term API key needed.
 
 ## Why SigV4?
 
@@ -8,9 +8,9 @@ Bedrock-mantle accepts both a long-term `AWS_BEARER_TOKEN_BEDROCK` key *and* sta
 
 ## Models
 
-Dynamically discovered at startup from the live `/v1/models` endpoint. As of June 2026, includes:
+Dynamically discovered at startup from the live `/v1/models` endpoint. As of September 2026, includes:
 
-- **OpenAI**: GPT-5.5, GPT-5.4 (+ dated variants), GPT-OSS 120B/20B
+- **OpenAI**: GPT-6 Astra, GPT-5.6 Luna/Sol/Terra, GPT-5.5, GPT-5.4 (+ dated variants), GPT-OSS 120B/20B
 - **DeepSeek**: V3.1, V3.2
 - **Qwen3**: 32B, 235B, Coder variants, VL (vision)
 - **Mistral**: Magistral, Devstral, Ministral, Voxtral
@@ -25,12 +25,12 @@ Falls back to a curated static list if discovery fails (expired creds at startup
 
 ## How it works
 
-1. At startup, the extension binds two **per-process loopback proxies on ephemeral ports** (one for each region: us-east-2/CMH, us-east-1/IAD). Each pi process owns its own proxies — no singleton state shared across processes, no port conflicts, no stale credentials surviving across long-lived consumers.
-2. The proxies sign every inbound request with SigV4 (using `BEDROCK_MANTLE_AWS_PROFILE` if set, else the default credential chain) and forward it to `bedrock-mantle.us-east-{1,2}.api.aws`.
-3. Live model discovery runs in the background — `/v1/models` queried in both regions, results merged. While discovery runs, pi uses a cached or curated fallback list so startup never blocks.
+1. At startup, the extension binds three **per-process loopback proxies on ephemeral ports** (us-east-2/CMH, us-east-1/IAD, and us-west-2/PDX). Each pi process owns its own proxies — no singleton state shared across processes, no port conflicts, no stale credentials surviving across long-lived consumers.
+2. The proxies sign every inbound request with SigV4 (using `BEDROCK_MANTLE_AWS_PROFILE` if set, else the default credential chain) and forward it to the matching `bedrock-mantle.{region}.api.aws` endpoint.
+3. Live model discovery runs in the background — `/v1/models` queried in all three regions, results merged. While discovery runs, pi uses a cached or curated fallback list so startup never blocks.
 4. Pi routes each model to the right driver based on the model id:
    - Anthropic Claude → `anthropic-messages` via `/anthropic/v1/messages`
-   - GPT-5.x → `openai-responses` via `/openai/v1/responses`
+   - GPT-5.x and GPT-6 Astra → `openai-responses` via `/openai/v1/responses`
    - GPT OSS and other OpenAI-compatible models → `openai-completions` via `/v1/chat/completions`
 5. Streaming SSE responses are piped back to pi unchanged.
 
@@ -104,14 +104,14 @@ The extension and proxy first honor `BEDROCK_MANTLE_AWS_PROFILE` via `fromIni({ 
 
 **HTTP 403** — account not allowlisted for bedrock-mantle.
 
-**Proxy port conflict** — by default, each pi process binds its own ephemeral ports, so port conflicts are impossible. If you've explicitly pinned `BEDROCK_MANTLE_PROXY_PORT_CMH` or `BEDROCK_MANTLE_PROXY_PORT_IAD` to a fixed value (e.g. for an external consumer that needs a stable URL), and that port is taken, change the value or unset the env var to fall back to ephemeral.
+**Proxy port conflict** — by default, each pi process binds its own ephemeral ports, so port conflicts are impossible. If you've explicitly pinned `BEDROCK_MANTLE_PROXY_PORT_CMH`, `BEDROCK_MANTLE_PROXY_PORT_IAD`, or `BEDROCK_MANTLE_PROXY_PORT_PDX` to a fixed value (e.g. for an external consumer that needs a stable URL), and that port is taken, change the value or unset the env var to fall back to ephemeral.
 
 ## Logging
 
 The extension logs to stderr with a leveled, key=value format:
 
 ```
-[bedrock-mantle] level=info kind=ready cmh_port=54321 iad_port=54322 profile=openclaw-bedrock
+[bedrock-mantle] level=info kind=ready cmh_port=54321 iad_port=54322 pdx_port=54323 profile=openclaw-bedrock
 [bedrock-mantle] level=debug kind=request id=Az3kP9 region=us-east-2 method=POST path=/openai/v1/responses status=200 latency_ms=412 bytes_in=2851 bytes_out=18432
 [bedrock-mantle] level=warn kind=request id=Bx7mQ2 region=us-east-1 status=403 latency_ms=98
 ```

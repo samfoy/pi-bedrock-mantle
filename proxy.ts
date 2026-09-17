@@ -15,9 +15,10 @@
  *        Default `port: 0` binds an ephemeral port — each pi process owns
  *        its own, so credentials/state never leak across processes.
  *
- * Two regions are supported in production:
+ * Three regions are supported in production:
  *   - us-east-2 (CMH)  GPT-5.x + shared OpenAI-style models
  *   - us-east-1 (IAD)  Anthropic Claude
+ *   - us-west-2 (PDX)  GPT-6 Astra
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -68,6 +69,7 @@ export const PROXY_PORT_CMH = parsePortEnv("BEDROCK_MANTLE_PROXY_PORT_CMH", 0);
  * `BEDROCK_MANTLE_PROXY_PORT_IAD=57891` to pin a fixed port.
  */
 export const PROXY_PORT_IAD = parsePortEnv("BEDROCK_MANTLE_PROXY_PORT_IAD", 0);
+export const PROXY_PORT_PDX = parsePortEnv("BEDROCK_MANTLE_PROXY_PORT_PDX", 0);
 
 // ─── Header filters ─────────────────────────────────────────────────────────
 
@@ -122,7 +124,7 @@ export interface SignAndForwardInput {
   headers?: Record<string, string | undefined>;
   /** Request body. May be a Buffer, string, or undefined. */
   body?: Buffer | string;
-  /** Bedrock region — currently "us-east-1" or "us-east-2". */
+  /** Bedrock region, such as "us-east-1", "us-east-2", or "us-west-2". */
   region: string;
 }
 
