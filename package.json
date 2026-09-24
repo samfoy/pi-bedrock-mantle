@@ -1,6 +1,6 @@
 {
   "name": "pi-bedrock-mantle",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "Pi extension: all Bedrock Mantle models (GPT-5.x, Claude, DeepSeek, Qwen3, Mistral, Kimi, ...) via SigV4 — no long-term API key needed",
   "author": "Sam Painter",
   "license": "MIT",
