@@ -4,9 +4,10 @@
  * Pi extension: all bedrock-mantle models — GPT-5.x, Anthropic Claude, DeepSeek,
  * Qwen3, Mistral, Kimi, and more — via SigV4 auth. No long-term API key needed.
  *
- * Each pi process binds its own ephemeral-port loopback proxy by default
- * (override with BEDROCK_MANTLE_PROXY_PORT_CMH/IAD if you need a stable URL
- * for an external consumer). Two regions are bridged:
+ * Each pi session binds its own ephemeral-port loopback proxies on
+ * session_start and closes them on session_shutdown (override the ports with
+ * BEDROCK_MANTLE_PROXY_PORT_CMH/IAD if you need a stable URL for an external
+ * consumer). Two regions are bridged:
  *
  *   - 127.0.0.1:<cmh>  →  bedrock-mantle.us-east-2.api.aws  (GPT-5.x + shared)
  *   - 127.0.0.1:<iad>  →  bedrock-mantle.us-east-1.api.aws  (Anthropic Claude)
@@ -70,36 +71,67 @@ function registerBedrockMantleProvider(pi, models, ports) {
         models,
     });
 }
-export default async function bedrockMantleExtension(pi) {
+/** Ports before session_start binds the proxies: a request fails fast with a connection error. */
+const UNBOUND = { cmh: 0, iad: 0 };
+function closeProxies(setup) {
+    return Promise.allSettled([setup.cmh?.close(), setup.iad?.close()]);
+}
+export default function bedrockMantleExtension(pi) {
     const profile = process.env.BEDROCK_MANTLE_AWS_PROFILE;
-    // Bind proxies first so the cache-derived baseUrls reference real ports.
-    const setup = await startProxies();
-    if (!setup.cmh && !setup.iad) {
-        log.error("startup_failed", { reason: "both_proxies_failed" });
-        return;
-    }
-    log.info("ready", {
-        cmh_port: setup.cmh?.port,
-        iad_port: setup.iad?.port,
-        profile: profile ?? "default-credential-chain",
-    });
-    // Register from the cache/fallback synchronously so the model list is
-    // available immediately. Live discovery runs in the background.
-    registerBedrockMantleProvider(pi, fastModels(setup.ports), setup.ports);
-    void (async () => {
-        try {
-            const models = await discoverModels(setup.ports);
-            registerBedrockMantleProvider(pi, models, setup.ports);
+    let setup;
+    let shutDown = false;
+    // Register now so `--model` / `--list-models` resolve during startup. Sockets
+    // wait for session_start: pi's lifecycle contract forbids them in the factory,
+    // since some invocations load extensions without starting a session.
+    registerBedrockMantleProvider(pi, fastModels(UNBOUND), UNBOUND);
+    pi.on("session_start", async () => {
+        if (setup || shutDown)
+            return;
+        const started = await startProxies();
+        if (shutDown) {
+            await closeProxies(started);
+            return;
+        }
+        setup = started;
+        if (!started.cmh && !started.iad) {
+            log.error("startup_failed", { reason: "both_proxies_failed" });
+            return;
+        }
+        log.info("ready", {
+            cmh_port: started.cmh?.port,
+            iad_port: started.iad?.port,
+            profile: profile ?? "default-credential-chain",
+        });
+        // Re-register with the bound ports; pi refreshes the selected model from
+        // the registry. Live discovery runs in the background.
+        registerBedrockMantleProvider(pi, fastModels(started.ports), started.ports);
+        void (async () => {
             try {
-                writeCachedModels(models, setup.ports);
+                const models = await discoverModels(started.ports);
+                // The runtime is stale after shutdown: registering would throw.
+                if (shutDown)
+                    return;
+                registerBedrockMantleProvider(pi, models, started.ports);
+                try {
+                    writeCachedModels(models, started.ports);
+                }
+                catch (err) {
+                    log.warn("cache_write_failed", { error: err });
+                }
+                log.info("discovery_refreshed", { models: models.length });
             }
             catch (err) {
-                log.warn("cache_write_failed", { error: err });
+                log.warn("discovery_failed", { error: err, fallback: "cached_or_curated" });
             }
-            log.info("discovery_refreshed", { models: models.length });
-        }
-        catch (err) {
-            log.warn("discovery_failed", { error: err, fallback: "cached_or_curated" });
-        }
-    })();
+        })();
+    });
+    // Every /new, /resume, /fork and /reload loads a fresh copy of this
+    // extension, so the old copy must release its listeners. Idempotent.
+    pi.on("session_shutdown", async () => {
+        shutDown = true;
+        const current = setup;
+        setup = undefined;
+        if (current)
+            await closeProxies(current);
+    });
 }

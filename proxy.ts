@@ -461,6 +461,9 @@ export function createSigningProxy(region: string, desiredPort = 0): Promise<Sig
         server,
         close: () => new Promise<void>((closeResolve, closeReject) => {
           server.close((err) => err ? closeReject(err) : closeResolve());
+          // pi awaits session_shutdown: a lingering keep-alive or stream socket
+          // must not hold the close open.
+          server.closeAllConnections();
         }),
       });
     });
