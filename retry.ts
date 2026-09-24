@@ -42,7 +42,7 @@
  */
 
 import { inspectResponseCompleted, type EmptyCompletionVerdict } from "./empty-completion.js";
-import { log, writeDump } from "./log.js";
+import { dumpDir, log, writeDump } from "./log.js";
 import { signAndForward, type SignAndForwardInput } from "./proxy.js";
 
 export interface RetryContext {
@@ -139,7 +139,7 @@ export async function fetchWithEmptyRetry(
     // (pi's driver expects a stream and sees nothing) — capture it for
     // forensics when a dump dir is configured. Errors (4xx/5xx) are expected
     // to be non-SSE and pass through untouched.
-    if (first.status === 200 && first.body && process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR) {
+    if (first.status === 200 && first.body && dumpDir()) {
       const buf = await bufferResponse(first);
       log.warn("empty_completion_non_sse", {
         id: ctx.requestId,
@@ -520,7 +520,7 @@ function maybeDumpBuffer(
   bytes: Uint8Array,
   requestBody: Buffer | string | undefined,
 ): void {
-  if (!process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR) return;
+  if (!dumpDir()) return;
   try {
     let request: unknown;
     if (requestBody !== undefined) {

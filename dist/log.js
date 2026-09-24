@@ -17,7 +17,7 @@
  */
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 const LEVEL_ORDER = {
     error: 0,
     warn: 1,
@@ -158,17 +158,39 @@ function writeToFileSink(line) {
     }
 }
 // ─── Forensic dumps ─────────────────────────────────────────────────────────
+let rejectedDumpDir;
 /**
- * Write `payload` as JSON to `$BEDROCK_MANTLE_EMPTY_DUMP_DIR/<fileName>` and
- * return the path, or `undefined` when the variable is unset. Dumps carry the
- * full prompt, so a directory this creates is 0700 and every file is 0600.
- * Throws on I/O failure; callers log and carry on.
+ * The directory `BEDROCK_MANTLE_EMPTY_DUMP_DIR` names, or `undefined` when
+ * dumps are off. A relative path would resolve against the cwd, usually a
+ * project repository, where a dump of the full prompt can get committed, so
+ * it turns dumps off with one warning per value.
  */
-export function writeDump(fileName, payload) {
+export function dumpDir() {
     const raw = process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR?.trim();
     if (!raw)
         return undefined;
     const dir = expandHome(raw);
+    if (isAbsolute(dir))
+        return dir;
+    if (rejectedDumpDir !== raw) {
+        rejectedDumpDir = raw;
+        emit("warn", "empty_dump_dir_rejected", {
+            dir: raw,
+            hint: "BEDROCK_MANTLE_EMPTY_DUMP_DIR must be an absolute path or start with ~/; dumps are off",
+        });
+    }
+    return undefined;
+}
+/**
+ * Write `payload` as JSON to `$BEDROCK_MANTLE_EMPTY_DUMP_DIR/<fileName>` and
+ * return the path, or `undefined` when dumps are off (see `dumpDir`). Dumps
+ * carry the full prompt, so a directory this creates is 0700 and every file
+ * is 0600. Throws on I/O failure; callers log and carry on.
+ */
+export function writeDump(fileName, payload) {
+    const dir = dumpDir();
+    if (!dir)
+        return undefined;
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const path = join(dir, fileName);
     writeFileSync(path, JSON.stringify(payload, null, 2), { mode: 0o600 });

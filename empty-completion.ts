@@ -27,7 +27,7 @@
  *     pass-through; we just don't add detection there yet.
  */
 
-import { log, writeDump } from "./log.js";
+import { dumpDir, log, writeDump } from "./log.js";
 
 /** Context carried into the detector so log lines correlate to the proxy request. */
 export interface EmptyCompletionContext {
@@ -213,7 +213,7 @@ function handleSseEvent(event: SseEvent, ctx: EmptyCompletionContext): void {
  * affect the user-visible response.
  */
 function maybeDumpPayload(ctx: EmptyCompletionContext, payload: unknown): void {
-  if (!process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR) return;
+  if (!dumpDir()) return;
   try {
     let requestPayload: unknown;
     if (ctx.requestBody !== undefined) {

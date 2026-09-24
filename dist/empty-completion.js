@@ -26,7 +26,7 @@
  *     so the SSE path covers production. A non-stream pass-through stays a
  *     pass-through; we just don't add detection there yet.
  */
-import { log, writeDump } from "./log.js";
+import { dumpDir, log, writeDump } from "./log.js";
 /**
  * If `upstream` is an SSE response on the openai-responses path, return a
  * `{ response, dispose }` pair whose response body is teed and scanned for
@@ -173,7 +173,7 @@ function handleSseEvent(event, ctx) {
  * affect the user-visible response.
  */
 function maybeDumpPayload(ctx, payload) {
-    if (!process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR)
+    if (!dumpDir())
         return;
     try {
         let requestPayload;

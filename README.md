@@ -312,7 +312,10 @@ when `BEDROCK_MANTLE_EMPTY_DUMP_DIR` is set:
 BEDROCK_MANTLE_EMPTY_DUMP_DIR=~/.pi/logs/empty-dumps
 ```
 
-A leading `~` expands to your home directory. Each capture writes
+The path must be absolute or start with `~/` (a leading `~` expands to your
+home directory). A relative path would land under the working directory,
+usually a project repository, so it turns dumps off and logs one
+`kind=empty_dump_dir_rejected` warning. Each capture writes
 `<dir>/<label>-<requestId>.json` with the full request body and raw response
 bytes, so the exact shape can be analysed before extending retry to cover it.
 Files are created with mode `0600`, and a directory the extension creates gets

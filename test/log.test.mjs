@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { getLogLevel, log, newRequestId, setLogFile, setLogLevel, writeDump } from "../.tmp-test/log.js";
-import { mkdtempSync, readFileSync, existsSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, existsSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -241,5 +241,29 @@ describe("writeDump (BEDROCK_MANTLE_EMPTY_DUMP_DIR)", () => {
       assert.equal(statSync(join(home, "dumps")).mode & 0o777, 0o700);
       assert.equal(statSync(path).mode & 0o777, 0o600);
     });
+  });
+
+  // A relative dir resolves against the cwd, usually a project repository,
+  // where a dump of the full prompt can end up committed.
+  test("rejects a relative path: warns once and writes nothing", () => {
+    setLogLevel("info");
+    for (const relative of ["dumps", "./dumps/nested", "~other/dumps"]) {
+      withHome(relative, (home) => {
+        const cwd = process.cwd();
+        process.chdir(home);
+        try {
+          const stderr = captureStderr(() => {
+            assert.equal(writeDump("probe.json", { request: "secret prompt" }), undefined);
+            assert.equal(writeDump("again.json", {}), undefined);
+          });
+          assert.deepEqual(readdirSync(home), [], "nothing written under the cwd");
+          const warnings = stderr.split("\n").filter((line) => line.includes("kind=empty_dump_dir_rejected"));
+          assert.equal(warnings.length, 1, stderr);
+          assert.match(warnings[0], /level=warn/);
+        } finally {
+          process.chdir(cwd);
+        }
+      });
+    }
   });
 });

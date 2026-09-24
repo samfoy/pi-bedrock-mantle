@@ -27,10 +27,17 @@ export declare function getLogLevel(): LogLevel;
  */
 export declare function setLogFile(path: string | undefined): void;
 /**
+ * The directory `BEDROCK_MANTLE_EMPTY_DUMP_DIR` names, or `undefined` when
+ * dumps are off. A relative path would resolve against the cwd, usually a
+ * project repository, where a dump of the full prompt can get committed, so
+ * it turns dumps off with one warning per value.
+ */
+export declare function dumpDir(): string | undefined;
+/**
  * Write `payload` as JSON to `$BEDROCK_MANTLE_EMPTY_DUMP_DIR/<fileName>` and
- * return the path, or `undefined` when the variable is unset. Dumps carry the
- * full prompt, so a directory this creates is 0700 and every file is 0600.
- * Throws on I/O failure; callers log and carry on.
+ * return the path, or `undefined` when dumps are off (see `dumpDir`). Dumps
+ * carry the full prompt, so a directory this creates is 0700 and every file
+ * is 0600. Throws on I/O failure; callers log and carry on.
  */
 export declare function writeDump(fileName: string, payload: unknown): string | undefined;
 export declare const log: {
