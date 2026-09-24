@@ -119,19 +119,16 @@ export function readCachedModels(ports, options = {}) {
     const raw = readRawCachedModels(options);
     return raw ? applyPorts(raw, ports) : null;
 }
-export function writeCachedModels(models) {
+export function writeCachedModels(models, ports) {
     const path = cachePath();
     mkdirSync(dirname(path), { recursive: true });
-    // Strip the bound ports out of baseUrls before persisting — bound ports
-    // change every run when ephemeral, but the routing logic (which port goes
-    // with which region/api) is stable.
+    // Swap each bound port for its region placeholder: ports change every run
+    // when ephemeral, but the region buildConfig() chose from discovery must
+    // survive. Derive it from the port, never from the model id or api.
     const sanitized = models.map((m) => {
         if (!m.baseUrl)
             return m;
-        const isAnthropic = m.api === "anthropic-messages";
-        const placeholder = isAnthropic ? IAD_PLACEHOLDER : CMH_PLACEHOLDER;
-        // Replace any 1-5-digit port immediately after `127.0.0.1:` with the placeholder.
-        const baseUrl = m.baseUrl.replace(/(127\.0\.0\.1:)\d+/, `$1${placeholder}`);
+        const baseUrl = m.baseUrl.replace(/(127\.0\.0\.1:)(\d+)/, (_, host, port) => `${host}${Number(port) === ports.iad ? IAD_PLACEHOLDER : CMH_PLACEHOLDER}`);
         return { ...m, baseUrl };
     });
     const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
@@ -343,7 +340,7 @@ export async function discoverModels(ports) {
 export async function fetchModels(ports) {
     try {
         const models = await discoverModels(ports);
-        writeCachedModels(models);
+        writeCachedModels(models, ports);
         return models;
     }
     catch (err) {

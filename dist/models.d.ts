@@ -52,7 +52,7 @@ export interface PiModelConfig {
 export declare function readCachedModels(ports: ProxyPorts, options?: {
     maxAgeMs?: number;
 }): PiModelConfig[] | null;
-export declare function writeCachedModels(models: PiModelConfig[]): void;
+export declare function writeCachedModels(models: PiModelConfig[], ports: ProxyPorts): void;
 export declare function fastModels(ports: ProxyPorts): PiModelConfig[];
 export declare function discoverModels(ports: ProxyPorts): Promise<PiModelConfig[]>;
 export declare function fetchModels(ports: ProxyPorts): Promise<PiModelConfig[]>;

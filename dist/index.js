@@ -91,7 +91,7 @@ export default async function bedrockMantleExtension(pi) {
             const models = await discoverModels(setup.ports);
             registerBedrockMantleProvider(pi, models, setup.ports);
             try {
-                writeCachedModels(models);
+                writeCachedModels(models, setup.ports);
             }
             catch (err) {
                 log.warn("cache_write_failed", { error: err });

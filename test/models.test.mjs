@@ -223,7 +223,7 @@ test("fastModels uses cached live discovery without performing network discovery
     ...FALLBACK_MODELS_RAW.find((model) => model.id === "openai.gpt-oss-20b"),
   }];
   assert.ok(cached[0]);
-  writeCachedModels(cached);
+  writeCachedModels(cached, TEST_PORTS);
 
   const models = fastModels(TEST_PORTS);
   assert.deepEqual(models.map((model) => model.id), ["openai.gpt-oss-20b"]);
@@ -275,10 +275,29 @@ test("writeCachedModels strips bound ports so the cache survives ephemeral resta
     ...FALLBACK_MODELS_RAW.find((model) => model.id === "openai.gpt-oss-20b"),
     baseUrl: "http://127.0.0.1:54321/v1",
   }];
-  writeCachedModels(live);
+  writeCachedModels(live, { cmh: 54321, iad: 54322 });
 
   // Re-read with different ports — should rehydrate to the new ports, not 54321.
   const models = fastModels({ cmh: 11111, iad: 22222 });
   assert.equal(models.length, 1);
   assert.equal(models[0].baseUrl, "http://127.0.0.1:11111/v1");
+});
+
+test("cache round trip keeps each model on the region proxy discovery chose", async () => {
+  // gpt-oss-120b only in us-east-1 routes to IAD even though it is not Anthropic.
+  // The two control rows must survive too, so a change can't pass by breaking both.
+  await withMockedFetch((url) => new Response(JSON.stringify({ data: url.includes("us-east-1")
+    ? [{ id: "openai.gpt-oss-120b" }, { id: "anthropic.claude-opus-4-7" }]
+    : [{ id: "openai.gpt-oss-20b" }] }), { status: 200, headers: { "content-type": "application/json" } }),
+  async () => {
+    const live = await fetchModels(TEST_PORTS);
+    const restarted = { cmh: 11111, iad: 22222 };
+    const fromCache = fastModels(restarted);
+    const baseUrl = (models, id) => models.find((model) => model.id === id)?.baseUrl;
+
+    assert.equal(baseUrl(live, "openai.gpt-oss-120b"), `http://127.0.0.1:${TEST_PORTS.iad}/v1`);
+    assert.equal(baseUrl(fromCache, "openai.gpt-oss-120b"), `http://127.0.0.1:${restarted.iad}/v1`);
+    assert.equal(baseUrl(fromCache, "openai.gpt-oss-20b"), `http://127.0.0.1:${restarted.cmh}/v1`);
+    assert.equal(baseUrl(fromCache, "anthropic.claude-opus-4-7"), `http://127.0.0.1:${restarted.iad}/anthropic`);
+  });
 });
