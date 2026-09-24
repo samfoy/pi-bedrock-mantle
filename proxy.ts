@@ -245,9 +245,13 @@ export async function signAndForward(input: SignAndForwardInput): Promise<Respon
     body: bodyBuf.toString("utf-8"),
   });
 
+  // fetch sends the same Content-Length itself; passing a copy duplicates it,
+  // which the undici 8 dispatcher pi's SDK installs rejects.
+  const { "content-length": _signedLength, ...fetchHeaders } = signed.headers as Record<string, string>;
+  void _signedLength;
   return fetch(target, {
     method,
-    headers: signed.headers as Record<string, string>,
+    headers: fetchHeaders,
     // Cast: Buffer extends Uint8Array which IS valid BodyInit at runtime, but
     // TypeScript's stricter Uint8Array<ArrayBufferLike> typing doesn't accept it.
     body: (bodyBuf.length > 0 ? bodyBuf : undefined) as BodyInit | undefined,

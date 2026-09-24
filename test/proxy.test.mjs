@@ -131,6 +131,25 @@ describe("signAndForward", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  // Node's fetch adds its own Content-Length; a second copy makes the undici 8
+  // dispatcher pi's SDK installs reject every request with a body.
+  test("signs Content-Length but leaves the header to fetch", async () => {
+    const originalFetch = globalThis.fetch;
+    let captured;
+    globalThis.fetch = async (_url, init) => {
+      captured = init?.headers;
+      return new Response("ok", { status: 200 });
+    };
+
+    try {
+      await signAndForward({ method: "POST", path: "/v1/chat/completions", body: "{}", region: "us-east-2" });
+      assert.equal(captured?.["content-length"], undefined);
+      assert.match(captured?.authorization ?? "", /SignedHeaders=content-length;/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 describe("createSigningProxy", () => {
