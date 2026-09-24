@@ -242,7 +242,9 @@ export async function signAndForward(input: SignAndForwardInput): Promise<Respon
     hostname: host,
     path,
     headers: headersToSign,
-    body: bodyBuf.toString("utf-8"),
+    // The Buffer fetch sends: the signer hashes its bytes as-is, while a
+    // utf-8 string would replace invalid sequences with U+FFFD first.
+    body: bodyBuf,
   });
 
   // fetch sends the same Content-Length itself; passing a copy duplicates it,

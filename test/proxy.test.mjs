@@ -1,6 +1,10 @@
-import { FAKE_ACCESS_KEY_ID } from "./hermetic.mjs";
+import { FAKE_ACCESS_KEY_ID, FAKE_SECRET_ACCESS_KEY } from "./hermetic.mjs";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { describe, test } from "node:test";
+
+import { Sha256 } from "@aws-crypto/sha256-js";
+import { SignatureV4 } from "@smithy/signature-v4";
 
 import {
   createSigningProxy,
@@ -146,6 +150,43 @@ describe("signAndForward", () => {
       await signAndForward({ method: "POST", path: "/v1/chat/completions", body: "{}", region: "us-east-2" });
       assert.equal(captured?.["content-length"], undefined);
       assert.match(captured?.authorization ?? "", /SignedHeaders=content-length;/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  // 0xff is not UTF-8: decoding it to a string first would sign U+FFFD instead.
+  test("signs the exact bytes it sends, including bytes that are not UTF-8", async () => {
+    const originalFetch = globalThis.fetch;
+    let captured;
+    globalThis.fetch = async (url, init) => {
+      captured = { url: new URL(String(url)), headers: init.headers, body: Buffer.from(init.body) };
+      return new Response("ok", { status: 200 });
+    };
+
+    try {
+      const body = Buffer.from([0x7b, 0x22, 0x61, 0x22, 0x3a, 0x22, 0xff, 0x22, 0x7d]); // {"a":"\xff"}
+      await signAndForward({ method: "POST", path: "/v1/chat/completions", body, region: "us-east-2" });
+      assert.deepEqual(captured.body, body, "the raw bytes go upstream");
+
+      const { authorization, "x-amz-date": amzDate, "x-amz-content-sha256": payloadHash, ...headers } = captured.headers;
+      assert.equal(payloadHash, createHash("sha256").update(captured.body).digest("hex"));
+      // Recompute the signature from what was sent: fetch adds Content-Length itself.
+      const signer = new SignatureV4({
+        credentials: { accessKeyId: FAKE_ACCESS_KEY_ID, secretAccessKey: FAKE_SECRET_ACCESS_KEY },
+        service: "bedrock",
+        region: "us-east-2",
+        sha256: Sha256,
+      });
+      const resigned = await signer.sign({
+        method: "POST",
+        protocol: "https:",
+        hostname: captured.url.hostname,
+        path: captured.url.pathname,
+        headers: { ...headers, "content-length": String(captured.body.length) },
+        body: captured.body,
+      }, { signingDate: new Date(amzDate.replace(/^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)(\d\d)Z$/, "$1-$2-$3T$4:$5:$6Z")) });
+      assert.equal(resigned.headers.authorization, authorization);
     } finally {
       globalThis.fetch = originalFetch;
     }

@@ -120,6 +120,9 @@ Found in review before release:
   the second `Content-Length` Node's built-in fetch adds next to the proxy's
   own. The proxy still signs `Content-Length` but leaves the header to fetch;
   the pi CLI was not affected.
+- The proxy signed the request body decoded as UTF-8 but sent the raw bytes,
+  so a body holding bytes that are not valid UTF-8 was sent with a signature
+  over different bytes. It now signs the exact Buffer it sends.
 - README troubleshooting described HTTP 401 as a missing permission and HTTP
   403 as an allowlist problem. 401 means the credentials were not accepted
   (invalid, expired, unsigned or malformed), 403 or `AccessDenied` means valid
