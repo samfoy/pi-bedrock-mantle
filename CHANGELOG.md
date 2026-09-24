@@ -108,8 +108,11 @@ Found in review before release:
   refreshes only the selected model when a provider re-registers, so the
   scoped copies kept the placeholder port 0, and a copy captured before a
   `/reload` kept the closed proxy's port. The provider's request path now
-  moves any loopback baseUrl to the live proxy of the model's region, and
-  fails with a clear error when no proxy is running. Regression tests drive
+  moves a baseUrl on the extension's own proxy (the placeholder port 0, or a
+  port one of its proxies bound in this process) to the live proxy of the
+  model's region, and fails with a clear error when no proxy is running. Any
+  other URL, such as a `models.json` model on another local server, is sent
+  as configured. Regression tests drive
   pi's SDK through the cycle, and through `/reload`, against a loopback mock
   of Bedrock Mantle.
 - When pi ran as an SDK embed, every request with a body failed with "fetch

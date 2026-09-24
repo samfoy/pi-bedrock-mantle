@@ -432,6 +432,17 @@ function makeHandler(region: string) {
   };
 }
 
+// Every port a signing proxy in this process has bound. On globalThis because
+// the bundled pi CLI evaluates this module again on /reload, and model copies
+// from before still name the earlier copy's ports.
+const BOUND_PORTS_KEY = Symbol.for("pi-bedrock-mantle.boundProxyPorts");
+const boundPorts: Set<number> = ((globalThis as Record<symbol, Set<number> | undefined>)[BOUND_PORTS_KEY] ??= new Set());
+
+/** Whether a signing proxy in this process has bound `port`, now or earlier. */
+export function isBoundProxyPort(port: number): boolean {
+  return boundPorts.has(port);
+}
+
 export interface SigningProxy {
   /** The actual bound port (resolved from the OS when desiredPort=0). */
   readonly port: number;
@@ -460,6 +471,7 @@ export function createSigningProxy(region: string, desiredPort = 0): Promise<Sig
     server.listen(desiredPort, "127.0.0.1", () => {
       const address = server.address();
       const port = typeof address === "object" && address ? address.port : desiredPort;
+      boundPorts.add(port);
       resolve({
         port,
         server,

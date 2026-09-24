@@ -13,6 +13,7 @@ import {
   writeCachedModels,
 } from "../.tmp-test/models.js";
 import { setLogLevel } from "../.tmp-test/log.js";
+import { createSigningProxy } from "../.tmp-test/proxy.js";
 
 // Test ports — fixed so URL assertions are stable; nothing actually binds in
 // these unit tests since fetch is mocked or model construction is pure.
@@ -360,19 +361,53 @@ test("cache round trip keeps each model on the region proxy discovery chose", as
   });
 });
 
-test("liveBaseUrl moves a placeholder or stale loopback port to the live proxy of the model's region", () => {
-  const ports = { cmh: 41001, iad: 41002 };
-  // gpt-oss-120b as discovery routed it: us-east-1 only, so the IAD proxy.
-  const live = { ports, models: [{ id: "openai.gpt-oss-120b", baseUrl: `http://127.0.0.1:${ports.iad}/v1` }] };
-  for (const stale of ["http://127.0.0.1:0/v1", "http://127.0.0.1:39999/v1", `http://127.0.0.1:${ports.cmh}/v1`]) {
-    assert.equal(liveBaseUrl({ id: "openai.gpt-oss-120b", baseUrl: stale }, live), `http://127.0.0.1:${ports.iad}/v1`);
+/** Live CMH and IAD proxies plus the port of one this process bound and closed. */
+async function withProxyPorts(run) {
+  const closed = await createSigningProxy("us-east-2", 0);
+  await closed.close();
+  const [cmh, iad] = await Promise.all([createSigningProxy("us-east-2", 0), createSigningProxy("us-east-1", 0)]);
+  try {
+    return await run({ cmh: cmh.port, iad: iad.port }, closed.port);
+  } finally {
+    await Promise.all([cmh.close(), iad.close()]);
   }
-  // A model the live list no longer carries routes by its API path.
-  assert.equal(liveBaseUrl({ id: "anthropic.gone", baseUrl: "http://127.0.0.1:0/anthropic" }, live),
-    `http://127.0.0.1:${ports.iad}/anthropic`);
-  assert.equal(liveBaseUrl({ id: "deepseek.gone", baseUrl: "http://127.0.0.1:0/openai/v1" }, live),
-    `http://127.0.0.1:${ports.cmh}/openai/v1`);
+}
+
+test("liveBaseUrl moves a placeholder or stale proxy port to the live proxy of the model's region", () =>
+  withProxyPorts((ports, stalePort) => {
+    // gpt-oss-120b as discovery routed it: us-east-1 only, so the IAD proxy.
+    const live = { ports, models: [{ id: "openai.gpt-oss-120b", baseUrl: `http://127.0.0.1:${ports.iad}/v1` }] };
+    for (const stale of ["http://127.0.0.1:0/v1", `http://127.0.0.1:${stalePort}/v1`, `http://127.0.0.1:${ports.cmh}/v1`]) {
+      assert.equal(liveBaseUrl({ id: "openai.gpt-oss-120b", baseUrl: stale }, live), `http://127.0.0.1:${ports.iad}/v1`);
+    }
+    // A model the live list no longer carries routes by its API path.
+    assert.equal(liveBaseUrl({ id: "anthropic.gone", baseUrl: "http://127.0.0.1:0/anthropic" }, live),
+      `http://127.0.0.1:${ports.iad}/anthropic`);
+    assert.equal(liveBaseUrl({ id: "deepseek.gone", baseUrl: "http://127.0.0.1:0/openai/v1" }, live),
+      `http://127.0.0.1:${ports.cmh}/openai/v1`);
+  }));
+
+// The bundled pi CLI transforms extensions with jiti's module cache off, so
+// /reload evaluates proxy.js again: a fresh URL does the same here.
+test("liveBaseUrl moves a port that an earlier copy of the proxy module bound", async () => {
+  const earlier = await import(`../.tmp-test/proxy.js?copy=${Date.now()}`);
+  const closed = await earlier.createSigningProxy("us-east-2", 0);
+  await closed.close();
+  const live = { ports: { cmh: 41001, iad: 41002 }, models: [] };
+  assert.equal(liveBaseUrl({ id: "deepseek.v3.2", baseUrl: `http://127.0.0.1:${closed.port}/v1` }, live),
+    "http://127.0.0.1:41001/v1");
 });
+
+// e.g. a models.json model on this provider that points at another local server.
+test("liveBaseUrl leaves a loopback baseUrl on a port no proxy of this process bound alone", () =>
+  withProxyPorts((ports) => {
+    const live = { ports, models: [{ id: "openai.gpt-oss-120b", baseUrl: `http://127.0.0.1:${ports.cmh}/v1` }] };
+    for (const baseUrl of ["http://127.0.0.1:8080/v1", "http://127.0.0.1/v1", "http://localhost:0/v1"]) {
+      const model = { id: "openai.gpt-oss-120b", baseUrl };
+      assert.equal(liveBaseUrl(model, live), baseUrl);
+      assert.equal(liveBaseUrl(model, undefined), baseUrl, "no proxy is needed for it");
+    }
+  }));
 
 test("liveBaseUrl leaves a non-loopback baseUrl alone", () => {
   const model = { id: "openai.gpt-oss-120b", baseUrl: "https://mantle.example.test/v1" };

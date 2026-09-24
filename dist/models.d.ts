@@ -52,8 +52,9 @@ export interface PiModelConfig {
 /**
  * The baseUrl a request for `model` must use now. pi keeps copies of a model
  * from before session_start bound the proxies (port 0) or from an earlier
- * session's proxies, e.g. the scoped models Ctrl+P cycles through, so a
- * loopback port is re-read from the live registration of the same id.
+ * session's proxies, e.g. the scoped models Ctrl+P cycles through, so such a
+ * port is re-read from the live registration of the same id. Any other URL,
+ * such as a models.json model on another local server, is left alone.
  */
 export declare function liveBaseUrl(model: {
     id: string;

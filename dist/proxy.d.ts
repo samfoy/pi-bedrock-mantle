@@ -59,6 +59,8 @@ export interface SignAndForwardInput {
  * directly to preserve streaming preserves (no buffering for SSE responses).
  */
 export declare function signAndForward(input: SignAndForwardInput): Promise<Response>;
+/** Whether a signing proxy in this process has bound `port`, now or earlier. */
+export declare function isBoundProxyPort(port: number): boolean;
 export interface SigningProxy {
     /** The actual bound port (resolved from the OS when desiredPort=0). */
     readonly port: number;

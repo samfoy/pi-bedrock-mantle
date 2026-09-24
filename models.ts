@@ -27,6 +27,7 @@ import { Sha256 } from "@aws-crypto/sha256-js";
 import { fromIni, fromNodeProviderChain } from "@aws-sdk/credential-providers";
 import { SignatureV4 } from "@smithy/signature-v4";
 import { log } from "./log.js";
+import { isBoundProxyPort } from "./proxy.js";
 
 /**
  * Bound proxy ports for the two regions. Used both to construct per-model
@@ -154,16 +155,18 @@ function applyPorts(models: PiModelConfig[], ports: ProxyPorts): PiModelConfig[]
 /**
  * The baseUrl a request for `model` must use now. pi keeps copies of a model
  * from before session_start bound the proxies (port 0) or from an earlier
- * session's proxies, e.g. the scoped models Ctrl+P cycles through, so a
- * loopback port is re-read from the live registration of the same id.
+ * session's proxies, e.g. the scoped models Ctrl+P cycles through, so such a
+ * port is re-read from the live registration of the same id. Any other URL,
+ * such as a models.json model on another local server, is left alone.
  */
 export function liveBaseUrl(
   model: { id: string; baseUrl: string },
   live: { ports: ProxyPorts; models: readonly PiModelConfig[] } | undefined,
 ): string {
   const url = new URL(model.baseUrl);
-  // Not this extension's proxy, e.g. a models.json override: leave it alone.
-  if (url.hostname !== "127.0.0.1") return model.baseUrl;
+  // Port 0 is the placeholder before session_start; "" is port 80, never ours.
+  const ours = url.hostname === "127.0.0.1" && (url.port === "0" || isBoundProxyPort(Number(url.port)));
+  if (!ours) return model.baseUrl;
   if (!live) {
     throw new Error(`bedrock-mantle: no proxy is running for ${model.id}; the pi session has not started or has shut down`);
   }
