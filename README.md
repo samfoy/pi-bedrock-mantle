@@ -4,11 +4,11 @@ Pi extension: all [Amazon Bedrock Mantle](https://bedrock-mantle.us-east-2.api.a
 
 ## Why SigV4?
 
-Bedrock-mantle accepts both a long-term `AWS_BEARER_TOKEN_BEDROCK` key *and* standard SigV4-signed requests. 
+Bedrock-mantle accepts both a long-term `AWS_BEARER_TOKEN_BEDROCK` key *and* standard SigV4-signed requests. This extension signs with SigV4, so it works with the short-lived AWS credentials you already use (SSO, `credential_process`, instance or container roles), and you never create, store or rotate a long-term API key.
 
 ## Models
 
-Dynamically discovered at startup from the live `/v1/models` endpoint in both regions. Models seen so far include:
+Dynamically discovered when a session starts, from the live `/v1/models` endpoint in both regions. Models seen so far include:
 
 - **OpenAI**: GPT-5.6 Luna/Sol/Terra (1M context), GPT-5.5, GPT-5.4 (+ dated variants), GPT-OSS 120B/20B, GPT-OSS Safeguard 120B/20B
 - **Anthropic** (us-east-1): Claude Opus 4.8, Claude Opus 4.7, Claude Haiku 4.5
@@ -26,8 +26,8 @@ Falls back to the curated static list in `models.ts` if discovery fails (expired
 
 ## How it works
 
-1. At startup, the extension binds two **per-process loopback proxies on ephemeral ports** (one for each region: us-east-2/CMH, us-east-1/IAD). Each pi process owns its own proxies — no singleton state shared across processes, no port conflicts, no stale credentials surviving across long-lived consumers.
-2. The proxies sign every inbound request with SigV4 (using `BEDROCK_MANTLE_AWS_PROFILE` if set, else the default credential chain) and forward it to `bedrock-mantle.us-east-{1,2}.api.aws`.
+1. When a pi session starts, the extension binds two **loopback proxies on ephemeral ports** (one for each region: us-east-2/CMH, us-east-1/IAD) and closes them when the session ends (`/new`, `/resume`, `/fork`, `/reload` or quit). Each session owns its own proxies — no singleton state shared across processes, no port conflicts, no stale credentials surviving across long-lived consumers.
+2. The proxies sign every inbound request with SigV4 (see [Credentials](#credentials)) and forward it to `bedrock-mantle.us-east-{1,2}.api.aws`.
 3. Live model discovery runs in the background — `/v1/models` queried in both regions, results merged. While discovery runs, pi uses a cached or curated fallback list so startup never blocks.
 4. Pi routes each model to the right driver based on the model id:
    - Anthropic Claude → `anthropic-messages` via `/anthropic/v1/messages`
@@ -60,24 +60,15 @@ If installed via `pi install`, it's already active. Otherwise add to `~/.pi/agen
 }
 ```
 
-### 3. Configure credentials
+### 3. Point it at credentials
 
-Add to `~/.aws/config`:
-
-```ini
-[profile bedrock-mantle]
-region=us-east-2
-output=json
-credential_process=...
-```
-
-Add to shell init:
+The extension signs with credentials you already have; it does not create them. The usual setup is a dedicated profile:
 
 ```bash
 export BEDROCK_MANTLE_AWS_PROFILE=bedrock-mantle
 ```
 
-> The `credential_process` auto-refreshes credentials on demand — no manual credential refresh needed.
+See [Credentials](#credentials) for the profile types that work and for the default chain used when the variable is unset.
 
 ### 4. Use
 
@@ -89,14 +80,90 @@ Or launch directly:
 pi --model bedrock-mantle/openai.gpt-5.5
 ```
 
-## Credential options
+## Credentials
 
-The extension and proxy first honor `BEDROCK_MANTLE_AWS_PROFILE` via `fromIni({ profile })` (recommended, because other pi extensions may set `AWS_PROFILE`). If that is unset, they fall back to [`fromNodeProviderChain`](https://docs.aws.amazon.com/AWSJavaScriptSDK/v3/latest/Package/-aws-sdk-credential-providers/), which tries:
+The extension does **not** vend credentials. It signs each request with AWS
+credentials that already exist on your machine, so you must point it at a
+source that yields them. The identity needs Bedrock Mantle inference access
+(see [Troubleshooting](#troubleshooting) for 401 and 403).
 
-1. `AWS_PROFILE` env var
-2. `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` env vars
-3. `~/.aws/credentials` + `~/.aws/config`
-4. EC2/ECS instance metadata
+### A dedicated profile (recommended)
+
+Set `BEDROCK_MANTLE_AWS_PROFILE` to a profile name. The extension resolves it
+with the AWS SDK's `fromIni`, which reads `~/.aws/config` and
+`~/.aws/credentials` and supports static keys, `credential_process`, IAM
+Identity Center (SSO) profiles, and role assumption (`role_arn` with
+`source_profile`). A dedicated variable also means another pi extension that
+changes `AWS_PROFILE` cannot redirect signing.
+
+For example, a profile backed by `credential_process`, which runs a command
+that prints credentials:
+
+```ini
+# ~/.aws/config
+[profile bedrock-mantle]
+credential_process = /usr/local/bin/print-aws-credentials
+```
+
+```bash
+export BEDROCK_MANTLE_AWS_PROFILE=bedrock-mantle
+```
+
+The command must be non-interactive and print JSON in the
+[`credential_process` format](https://docs.aws.amazon.com/sdkref/latest/guide/feature-process-credentials.html)
+to stdout:
+
+```json
+{
+  "Version": 1,
+  "AccessKeyId": "AKIAIOSFODNN7EXAMPLE",
+  "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+  "SessionToken": "example-session-token",
+  "Expiration": "2026-09-24T18:00:00Z"
+}
+```
+
+`SessionToken` and `Expiration` are optional; leave both out for long-lived
+keys. Credentials are currently resolved for every request, so the command
+runs once per model call (see *Known issues* in the
+[CHANGELOG](https://github.com/samfoy/pi-bedrock-mantle/blob/main/CHANGELOG.md)).
+Keep it fast, and cache inside the helper if fetching is slow.
+
+An SSO profile needs a live login first (`aws sso login --profile <name>`):
+the extension reads the cached SSO token and cannot open a browser.
+
+### The default credential chain
+
+With `BEDROCK_MANTLE_AWS_PROFILE` unset, the extension uses the Node default
+chain from the AWS SDK for JavaScript
+([`@aws-sdk/credential-provider-node`](https://github.com/aws/aws-sdk-js-v3/tree/main/packages-internal/credential-provider-node)
+`defaultProvider`) and takes the first source that yields credentials:
+
+1. **Environment keys**: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+   (plus `AWS_SESSION_TOKEN`). Skipped when `AWS_PROFILE` is set.
+2. **Shared config and credentials files**: the profile named by
+   `AWS_PROFILE`, or `default`. Every profile type listed above works here,
+   including `credential_process` and SSO.
+3. **`credential_process`** of that profile, through the standalone process
+   provider.
+4. **Web-identity token file**: `AWS_WEB_IDENTITY_TOKEN_FILE` with
+   `AWS_ROLE_ARN`.
+5. **Container or instance metadata**: ECS container credentials
+   (`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` or `_FULL_URI`), otherwise EC2
+   instance metadata unless `AWS_EC2_METADATA_DISABLED=true`.
+
+### Regions are fixed
+
+The region comes from the model family, not from your configuration:
+
+| Models | Region | Endpoint |
+|---|---|---|
+| GPT-5.x, GPT-OSS and the other shared models | us-east-2 | `bedrock-mantle.us-east-2.api.aws` |
+| Anthropic Claude | us-east-1 | `bedrock-mantle.us-east-1.api.aws` |
+
+A non-Claude model that discovery finds only in us-east-1 is sent there.
+`AWS_REGION`, `AWS_DEFAULT_REGION` and a profile's `region` setting are
+ignored for routing and signing, so the profile does not need one.
 
 ## Troubleshooting
 
@@ -164,7 +231,7 @@ with `output_tokens: 0` and `stop_reason: "completed"`. The same exact
 request succeeds 80–90% of the time and produces nothing the rest. To pi
 (and any agent loop) this looks like a clean "done" with nothing to
 render, and the slot exits silently mid-turn. Forensics:
-`forensics-2026-06-07/findings.md`.
+[`forensics-2026-06-07/findings.md`](https://github.com/samfoy/pi-bedrock-mantle/blob/main/forensics-2026-06-07/findings.md).
 
 The proxy detects this pattern on `/openai/v1/responses` SSE streams without
 modifying the response. When detected, it emits a warn-level log line
