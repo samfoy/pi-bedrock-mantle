@@ -1,6 +1,6 @@
 # pi-bedrock-mantle
 
-Pi extension: all [Amazon Bedrock Mantle](https://bedrock-mantle.us-east-2.api.aws) models (GPT-5.5, DeepSeek, Qwen3, Mistral, Kimi, and more) with **SigV4 auth** — no long-term API key needed.
+Pi extension: all [Amazon Bedrock Mantle](https://bedrock-mantle.us-east-2.api.aws) models (GPT-5.x, Claude, DeepSeek, Qwen3, Mistral, Kimi, and more) with **SigV4 auth** — no long-term API key needed.
 
 ## Why SigV4?
 
@@ -8,9 +8,10 @@ Bedrock-mantle accepts both a long-term `AWS_BEARER_TOKEN_BEDROCK` key *and* sta
 
 ## Models
 
-Dynamically discovered at startup from the live `/v1/models` endpoint. As of June 2026, includes:
+Dynamically discovered at startup from the live `/v1/models` endpoint in both regions. Models seen so far include:
 
-- **OpenAI**: GPT-5.5, GPT-5.4 (+ dated variants), GPT-OSS 120B/20B
+- **OpenAI**: GPT-5.6 Luna/Sol/Terra (1M context), GPT-5.5, GPT-5.4 (+ dated variants), GPT-OSS 120B/20B, GPT-OSS Safeguard 120B/20B
+- **Anthropic** (us-east-1): Claude Opus 4.8, Claude Opus 4.7, Claude Haiku 4.5
 - **DeepSeek**: V3.1, V3.2
 - **Qwen3**: 32B, 235B, Coder variants, VL (vision)
 - **Mistral**: Magistral, Devstral, Ministral, Voxtral
@@ -21,7 +22,7 @@ Dynamically discovered at startup from the live `/v1/models` endpoint. As of Jun
 - **ZAI**: GLM-4.6, GLM-4.7, GLM-5
 - **Writer**: Palmyra Vision 7B
 
-Falls back to a curated static list if discovery fails (expired creds at startup).
+Falls back to the curated static list in `models.ts` if discovery fails (expired creds at startup). The last successful discovery is cached in `${XDG_CACHE_HOME:-~/.cache}/pi-bedrock-mantle/models.json` (override the path with `BEDROCK_MANTLE_MODEL_CACHE`) and used on the next start while discovery refreshes in the background.
 
 ## How it works
 
@@ -42,13 +43,16 @@ Falls back to a curated static list if discovery fails (expired creds at startup
 # Via pi (recommended)
 pi install npm:pi-bedrock-mantle
 
+# Or straight from GitHub
+pi install git:github.com/samfoy/pi-bedrock-mantle
+
 # Or manually
 npm install -g pi-bedrock-mantle
 ```
 
 ### 2. Register with pi
 
-If installed via `pi install`, it's already active. Otherwise add to `~/.pi/settings.json`:
+If installed via `pi install`, it's already active. Otherwise add to `~/.pi/agent/settings.json`:
 
 ```json
 {
@@ -73,7 +77,7 @@ Add to shell init:
 export BEDROCK_MANTLE_AWS_PROFILE=bedrock-mantle
 ```
 
-> The `credential_process` auto-refreshes credentials on demand — no manual `ada credentials update` needed.
+> The `credential_process` auto-refreshes credentials on demand — no manual credential refresh needed.
 
 ### 4. Use
 
@@ -98,9 +102,9 @@ The extension and proxy first honor `BEDROCK_MANTLE_AWS_PROFILE` via `fromIni({ 
 
 **Models don't appear** — extension not loading. Check that the path in `settings.json` is correct and `npm install` has been run.
 
-**`[bedrock-mantle] Model discovery failed`** — AWS creds unavailable at startup. Models fall back to a static list. 
+**`[bedrock-mantle] level=warn kind=discovery_failed`** — AWS creds unavailable at startup. Models fall back to the cached or curated static list.
 
-**HTTP 401** — role doesn't have `bedrock-mantle:CreateInference`. Use a role with Bedrock access (e.g. `IibsAdminAccess-DO-NOT-DELETE` on your personal dev account).
+**HTTP 401** — role doesn't have `bedrock-mantle:CreateInference`. Use a role whose policy grants Bedrock Mantle access.
 
 **HTTP 403** — account not allowlisted for bedrock-mantle.
 
@@ -250,10 +254,14 @@ reports "Provider returned an empty stream".
 
 The same buffer-and-retry layer now treats this as retryable: a terminal
 `response.failed` whose error code is transient (`server_error`,
-`internal_error`, `rate_limit_exceeded`, `service_unavailable`,
-`server_overloaded`, `overloaded_error`, `timeout`, or no code) is re-issued
-once. Client-side failures (`invalid_request_error`, content filter, …) pass
-through untouched. Logged as `kind=upstream_failed_retry`:
+`internal_error`, `service_unavailable`, `server_overloaded`,
+`overloaded_error`, `gateway_timeout`, `bad_gateway`, `timeout`, or no code)
+is re-issued once. So is a client-looking code whose message names a Bedrock
+routing failure ("Engine not found", "Engine bad request", "Job registration
+failed", seen on gpt-5.4 as `invalid_prompt`). Other client-side failures
+(`invalid_request_error`, content filter, …) pass through untouched.
+`rate_limit_exceeded` is not retried, because an immediate retry without
+backoff rarely helps. Logged as `kind=upstream_failed_retry`:
 
 ```
 [bedrock-mantle] level=warn kind=upstream_failed_retry id=… error_code=server_error attempt=1 action=retrying
