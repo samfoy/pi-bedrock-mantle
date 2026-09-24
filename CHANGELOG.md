@@ -48,7 +48,9 @@ had moved well past it without a release.
   longer survive across long-lived consumers. The proxies are bound on
   `session_start` and closed on `session_shutdown`, as pi's extension
   lifecycle requires; the provider is registered from the factory with a
-  placeholder port and re-registered with the bound ports.
+  placeholder port and re-registered with the bound ports. Every request
+  re-resolves the live port, so a model object pi captured earlier still
+  reaches the current proxies.
   `BEDROCK_MANTLE_PROXY_PORT_CMH` and `BEDROCK_MANTLE_PROXY_PORT_IAD` still pin
   a port.
 - README: one Credentials section. The extension does not vend credentials;
@@ -58,8 +60,11 @@ had moved well past it without a release.
 - The package ships compiled JavaScript: the pi manifest points at
   `./dist/index.js` (1.0.2 shipped `./index.ts`). `dist/` is committed so
   `pi install git:github.com/samfoy/pi-bedrock-mantle` works without a build.
-- `@earendil-works/pi-coding-agent` is an optional `"*"` peer dependency. The
-  extension only imports its types.
+- `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` are optional
+  `"*"` peer dependencies, supplied by pi when it loads the extension. The
+  provider is now a complete pi-ai provider (`createProvider`) that delegates
+  to pi's Anthropic Messages, OpenAI Responses and OpenAI Chat Completions
+  implementations.
 - Package metadata: the `pi-package` keyword (lists the package in the pi
   package gallery), `engines.node >=22.19.0`, `homepage`, `bugs`, and the
   author and LICENSE holder corrected to Sam Painter.
@@ -94,6 +99,26 @@ Found in review before release:
   inside the current project.
 - `SigningProxy.close()` also drops open connections, so a keep-alive socket
   cannot stall pi's awaited `session_shutdown`.
+- Cycling to a mantle model with Ctrl+P (the scoped models from
+  `enabledModels` or `--models`) always failed with "Connection error". pi
+  refreshes only the selected model when a provider re-registers, so the
+  scoped copies kept the placeholder port 0, and a copy captured before a
+  `/reload` kept the closed proxy's port. The provider's request path now
+  moves any loopback baseUrl to the live proxy of the model's region, and
+  fails with a clear error when no proxy is running. Regression tests drive
+  pi's SDK through the cycle, and through `/reload`, against a loopback mock
+  of Bedrock Mantle.
+- When pi ran as an SDK embed, every request with a body failed with "fetch
+  failed". Importing pi's SDK installs its undici 8 dispatcher, which rejects
+  the second `Content-Length` Node's built-in fetch adds next to the proxy's
+  own. The proxy still signs `Content-Length` but leaves the header to fetch;
+  the pi CLI was not affected.
+- README troubleshooting described HTTP 401 as a missing permission and HTTP
+  403 as an allowlist problem. 401 means the credentials were not accepted
+  (invalid, expired, unsigned or malformed), 403 or `AccessDenied` means valid
+  credentials without the permission, and a `proxy_error` 500 means the proxy
+  could not sign or send the request, usually because no credentials could be
+  resolved.
 
 ### Security
 
@@ -101,6 +126,10 @@ Found in review before release:
   injected memory). Dump files are now written `0600` and a dump directory
   the extension creates is `0700`, and the README warns never to point
   `BEDROCK_MANTLE_EMPTY_DUMP_DIR` inside a git repository.
+- A relative `BEDROCK_MANTLE_EMPTY_DUMP_DIR` is rejected: it would resolve
+  against the working directory, usually a project repository. Dumps stay off
+  and one `kind=empty_dump_dir_rejected` warning is logged. An absolute path
+  or one starting with `~/` works as before.
 - The model cache only accepts a `baseUrl` on the extension's own loopback
   proxy (`http://127.0.0.1:` plus a port placeholder and a known route). Any
   other value rejects the cache and the curated list is used, so a tampered
