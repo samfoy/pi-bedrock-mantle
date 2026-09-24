@@ -9,6 +9,10 @@ All notable changes to this project are documented here. The format follows
 Everything since 1.0.2, the last version on npm (2026-06-04). GitHub `main`
 had moved well past it without a release.
 
+**Breaking:** the minimum pi is now 0.81.0. On older pi the extension
+registers no models and prints one line naming the running pi version; stay
+on `pi install npm:pi-bedrock-mantle@1.0.2` there.
+
 ### Added
 
 - GPT-5.6 model metadata: `openai.gpt-5.6-luna`, `openai.gpt-5.6-sol` and
@@ -61,7 +65,7 @@ had moved well past it without a release.
   `./dist/index.js` (1.0.2 shipped `./index.ts`). `dist/` is committed so
   `pi install git:github.com/samfoy/pi-bedrock-mantle` works without a build.
 - `@earendil-works/pi-coding-agent` and `@earendil-works/pi-ai` are optional
-  `"*"` peer dependencies, supplied by pi when it loads the extension. The
+  `>=0.81.0` peer dependencies, supplied by pi when it loads the extension. The
   provider is now a complete pi-ai provider (`createProvider`) that delegates
   to pi's Anthropic Messages, OpenAI Responses and OpenAI Chat Completions
   implementations.

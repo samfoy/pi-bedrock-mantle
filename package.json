@@ -50,8 +50,8 @@
     "@smithy/signature-v4": "^5.1.1"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-ai": ">=0.81.0",
+    "@earendil-works/pi-coding-agent": ">=0.81.0"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-ai": {

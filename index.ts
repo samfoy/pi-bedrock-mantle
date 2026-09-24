@@ -18,19 +18,14 @@
  * and every request re-resolves the live port (see liveBaseUrl).
  */
 
-import {
-  anthropicMessagesApi,
-  type Api,
-  createProvider,
-  lazyStream,
-  type Model,
-  openAICompletionsApi,
-  openAIResponsesApi,
-  type ProviderAuth,
-  type ProviderStreams,
-  type ThinkingLevelMap,
+import type {
+  Api,
+  Model,
+  ProviderAuth,
+  ProviderStreams,
+  ThinkingLevelMap,
 } from "@earendil-works/pi-ai/compat";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, VERSION } from "@earendil-works/pi-coding-agent";
 import {
   discoverModels,
   fastModels,
@@ -99,19 +94,33 @@ const SIGV4_AUTH: ProviderAuth = {
   },
 };
 
-const API_STREAMS: Record<string, ProviderStreams> = {
-  "anthropic-messages": anthropicMessagesApi(),
-  "openai-responses": openAIResponsesApi(),
-  "openai-completions": openAICompletionsApi(),
-};
+type PiAi = typeof import("@earendil-works/pi-ai/compat");
+
+/**
+ * Why this pi cannot run the extension, or undefined when it can. pi 0.81.0
+ * is the first to accept a createProvider() provider in registerProvider;
+ * older pi drops every model of it.
+ */
+export function piVersionError(version: string | undefined): string | undefined {
+  const match = /^(\d+)\.(\d+)\.\d+/.exec(version ?? "");
+  const supported = match !== null && (Number(match[1]) > 0 || Number(match[2]) >= 81);
+  return supported
+    ? undefined
+    : `pi-bedrock-mantle 1.1 needs pi 0.81.0 or newer (this is pi ${version ?? "unknown"}). Upgrade pi, or install npm:pi-bedrock-mantle@1.0.2.`;
+}
 
 /** pi's API streams, sending each request to the live proxy whatever port the model object names. */
-function viaLiveProxy(baseUrlFor: (model: Model<Api>) => string): Record<string, ProviderStreams> {
+function viaLiveProxy(ai: PiAi, baseUrlFor: (model: Model<Api>) => string): Record<string, ProviderStreams> {
+  const apiStreams: Record<string, ProviderStreams> = {
+    "anthropic-messages": ai.anthropicMessagesApi(),
+    "openai-responses": ai.openAIResponsesApi(),
+    "openai-completions": ai.openAICompletionsApi(),
+  };
   const live = (model: Model<Api>): Model<Api> => ({ ...model, baseUrl: baseUrlFor(model) });
-  return Object.fromEntries(Object.entries(API_STREAMS).map(([api, streams]) => [api, {
-    stream: (model, context, options) => lazyStream(model, async () => streams.stream(live(model), context, options)),
+  return Object.fromEntries(Object.entries(apiStreams).map(([api, streams]) => [api, {
+    stream: (model, context, options) => ai.lazyStream(model, async () => streams.stream(live(model), context, options)),
     streamSimple: (model, context, options) =>
-      lazyStream(model, async () => streams.streamSimple(live(model), context, options)),
+      ai.lazyStream(model, async () => streams.streamSimple(live(model), context, options)),
   } satisfies ProviderStreams]));
 }
 
@@ -127,13 +136,14 @@ function toModel(config: PiModelConfig, providerBaseUrl: string): Model<Api> {
 
 function registerBedrockMantleProvider(
   pi: ExtensionAPI,
+  ai: PiAi,
   models: PiModelConfig[],
   ports: ProxyPorts,
   api: Record<string, ProviderStreams>,
 ): void {
   // Prefer the CMH proxy (more models route there); port 0 until one binds.
   const baseUrl = `http://127.0.0.1:${ports.cmh || ports.iad || 0}/v1`;
-  pi.registerProvider(createProvider({
+  pi.registerProvider(ai.createProvider({
     id: PROVIDER_ID,
     name: "Bedrock Mantle",
     baseUrl,
@@ -150,16 +160,28 @@ function closeProxies(setup: ProxySetup): Promise<unknown> {
   return Promise.allSettled([setup.cmh?.close(), setup.iad?.close()]);
 }
 
-export default function bedrockMantleExtension(pi: ExtensionAPI): void {
+export default async function bedrockMantleExtension(
+  pi: ExtensionAPI,
+  piVersion: string | undefined = VERSION,
+): Promise<void> {
+  // Before any pi API use: on older pi, say why instead of losing every model.
+  const unsupported = piVersionError(piVersion);
+  if (unsupported) {
+    console.error(unsupported);
+    return;
+  }
+  // Imported after the check: pi 0.79 has no pi-ai/compat, which would fail the module load.
+  const ai: PiAi = await import("@earendil-works/pi-ai/compat");
+
   const profile = process.env.BEDROCK_MANTLE_AWS_PROFILE;
   let setup: ProxySetup | undefined;
   let shutDown = false;
   let registered: readonly PiModelConfig[] = [];
 
   // Read at request time: the proxies up now and the latest registration.
-  const api = viaLiveProxy((model) => liveBaseUrl(model, setup && { ports: setup.ports, models: registered }));
+  const api = viaLiveProxy(ai, (model) => liveBaseUrl(model, setup && { ports: setup.ports, models: registered }));
   const register = (models: PiModelConfig[], ports: ProxyPorts): void => {
-    registerBedrockMantleProvider(pi, models, ports, api);
+    registerBedrockMantleProvider(pi, ai, models, ports, api);
     registered = models;
   };
 

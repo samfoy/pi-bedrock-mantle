@@ -39,6 +39,8 @@ Falls back to the curated static list in `models.ts` if discovery fails (expired
 
 ### 1. Install
 
+Requires pi 0.81 or newer. On older pi, use `pi install npm:pi-bedrock-mantle@1.0.2`.
+
 ```bash
 # Via pi (recommended)
 pi install npm:pi-bedrock-mantle

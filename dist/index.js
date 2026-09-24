@@ -17,7 +17,7 @@
  * openai-completions. Per-model baseUrls route each model to the right proxy,
  * and every request re-resolves the live port (see liveBaseUrl).
  */
-import { anthropicMessagesApi, createProvider, lazyStream, openAICompletionsApi, openAIResponsesApi, } from "@earendil-works/pi-ai/compat";
+import { VERSION } from "@earendil-works/pi-coding-agent";
 import { discoverModels, fastModels, liveBaseUrl, writeCachedModels, } from "./models.js";
 import { createSigningProxy, PROXY_PORT_CMH, PROXY_PORT_IAD, } from "./proxy.js";
 import { log } from "./log.js";
@@ -61,17 +61,29 @@ const SIGV4_AUTH = {
         resolve: async () => ({ auth: { apiKey: "sigv4-via-proxy" }, source: "AWS credentials via the SigV4 proxy" }),
     },
 };
-const API_STREAMS = {
-    "anthropic-messages": anthropicMessagesApi(),
-    "openai-responses": openAIResponsesApi(),
-    "openai-completions": openAICompletionsApi(),
-};
+/**
+ * Why this pi cannot run the extension, or undefined when it can. pi 0.81.0
+ * is the first to accept a createProvider() provider in registerProvider;
+ * older pi drops every model of it.
+ */
+export function piVersionError(version) {
+    const match = /^(\d+)\.(\d+)\.\d+/.exec(version ?? "");
+    const supported = match !== null && (Number(match[1]) > 0 || Number(match[2]) >= 81);
+    return supported
+        ? undefined
+        : `pi-bedrock-mantle 1.1 needs pi 0.81.0 or newer (this is pi ${version ?? "unknown"}). Upgrade pi, or install npm:pi-bedrock-mantle@1.0.2.`;
+}
 /** pi's API streams, sending each request to the live proxy whatever port the model object names. */
-function viaLiveProxy(baseUrlFor) {
+function viaLiveProxy(ai, baseUrlFor) {
+    const apiStreams = {
+        "anthropic-messages": ai.anthropicMessagesApi(),
+        "openai-responses": ai.openAIResponsesApi(),
+        "openai-completions": ai.openAICompletionsApi(),
+    };
     const live = (model) => ({ ...model, baseUrl: baseUrlFor(model) });
-    return Object.fromEntries(Object.entries(API_STREAMS).map(([api, streams]) => [api, {
-            stream: (model, context, options) => lazyStream(model, async () => streams.stream(live(model), context, options)),
-            streamSimple: (model, context, options) => lazyStream(model, async () => streams.streamSimple(live(model), context, options)),
+    return Object.fromEntries(Object.entries(apiStreams).map(([api, streams]) => [api, {
+            stream: (model, context, options) => ai.lazyStream(model, async () => streams.stream(live(model), context, options)),
+            streamSimple: (model, context, options) => ai.lazyStream(model, async () => streams.streamSimple(live(model), context, options)),
         }]));
 }
 function toModel(config, providerBaseUrl) {
@@ -83,10 +95,10 @@ function toModel(config, providerBaseUrl) {
         thinkingLevelMap: config.thinkingLevelMap,
     };
 }
-function registerBedrockMantleProvider(pi, models, ports, api) {
+function registerBedrockMantleProvider(pi, ai, models, ports, api) {
     // Prefer the CMH proxy (more models route there); port 0 until one binds.
     const baseUrl = `http://127.0.0.1:${ports.cmh || ports.iad || 0}/v1`;
-    pi.registerProvider(createProvider({
+    pi.registerProvider(ai.createProvider({
         id: PROVIDER_ID,
         name: "Bedrock Mantle",
         baseUrl,
@@ -100,15 +112,23 @@ const UNBOUND = { cmh: 0, iad: 0 };
 function closeProxies(setup) {
     return Promise.allSettled([setup.cmh?.close(), setup.iad?.close()]);
 }
-export default function bedrockMantleExtension(pi) {
+export default async function bedrockMantleExtension(pi, piVersion = VERSION) {
+    // Before any pi API use: on older pi, say why instead of losing every model.
+    const unsupported = piVersionError(piVersion);
+    if (unsupported) {
+        console.error(unsupported);
+        return;
+    }
+    // Imported after the check: pi 0.79 has no pi-ai/compat, which would fail the module load.
+    const ai = await import("@earendil-works/pi-ai/compat");
     const profile = process.env.BEDROCK_MANTLE_AWS_PROFILE;
     let setup;
     let shutDown = false;
     let registered = [];
     // Read at request time: the proxies up now and the latest registration.
-    const api = viaLiveProxy((model) => liveBaseUrl(model, setup && { ports: setup.ports, models: registered }));
+    const api = viaLiveProxy(ai, (model) => liveBaseUrl(model, setup && { ports: setup.ports, models: registered }));
     const register = (models, ports) => {
-        registerBedrockMantleProvider(pi, models, ports, api);
+        registerBedrockMantleProvider(pi, ai, models, ports, api);
         registered = models;
     };
     // Register now so `--model` / `--list-models` resolve during startup. Sockets

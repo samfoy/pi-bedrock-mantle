@@ -17,5 +17,11 @@
  * openai-completions. Per-model baseUrls route each model to the right proxy,
  * and every request re-resolves the live port (see liveBaseUrl).
  */
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-export default function bedrockMantleExtension(pi: ExtensionAPI): void;
+import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+/**
+ * Why this pi cannot run the extension, or undefined when it can. pi 0.81.0
+ * is the first to accept a createProvider() provider in registerProvider;
+ * older pi drops every model of it.
+ */
+export declare function piVersionError(version: string | undefined): string | undefined;
+export default function bedrockMantleExtension(pi: ExtensionAPI, piVersion?: string | undefined): Promise<void>;
