@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [1.1.0] - unreleased
+## [1.1.0] - 2026-09-24
 
 Everything since 1.0.2, the last version on npm (2026-06-04). GitHub `main`
 had moved well past it without a release.
@@ -43,10 +43,18 @@ had moved well past it without a release.
   model list, and live `/v1/models` discovery refreshes it in the background.
   The cache lives in `${XDG_CACHE_HOME:-~/.cache}/pi-bedrock-mantle/models.json`
   (`BEDROCK_MANTLE_MODEL_CACHE` overrides it).
-- Each pi process now binds its own loopback proxies on ephemeral ports instead
+- Each pi session now binds its own loopback proxies on ephemeral ports instead
   of sharing a singleton on fixed ports 57893/57891, so stale credentials no
-  longer survive across long-lived consumers. `BEDROCK_MANTLE_PROXY_PORT_CMH`
-  and `BEDROCK_MANTLE_PROXY_PORT_IAD` still pin a port.
+  longer survive across long-lived consumers. The proxies are bound on
+  `session_start` and closed on `session_shutdown`, as pi's extension
+  lifecycle requires; the provider is registered from the factory with a
+  placeholder port and re-registered with the bound ports.
+  `BEDROCK_MANTLE_PROXY_PORT_CMH` and `BEDROCK_MANTLE_PROXY_PORT_IAD` still pin
+  a port.
+- README: one Credentials section. The extension does not vend credentials;
+  it documents `BEDROCK_MANTLE_AWS_PROFILE` (static keys, `credential_process`,
+  SSO), the Node default chain in its real order, and that regions are fixed
+  per model family (`AWS_REGION` and a profile's `region` are ignored).
 - The package ships compiled JavaScript: the pi manifest points at
   `./dist/index.js` (1.0.2 shipped `./index.ts`). `dist/` is committed so
   `pi install git:github.com/samfoy/pi-bedrock-mantle` works without a build.
@@ -68,6 +76,57 @@ had moved well past it without a release.
   The startup cache, new in this release, used to send it to us-east-2.
 - The test suite no longer writes to a `BEDROCK_MANTLE_LOG_FILE` or
   `BEDROCK_MANTLE_EMPTY_DUMP_DIR` exported in the caller's shell.
+
+Found in review before release:
+
+- The per-process proxies leaked two listening sockets on every `/new`,
+  `/resume`, `/fork` and `/reload`, because they were bound in the extension
+  factory and never closed. They now follow the session lifecycle, and a
+  regression test drives pi's session runtime through four sessions and checks
+  that the listener count returns to its baseline.
+- `BEDROCK_MANTLE_EMPTY_DUMP_DIR` expands a leading `~`. It used to be taken
+  literally, so the README's own example wrote dumps into a `./~` directory
+  inside the current project.
+- `SigningProxy.close()` also drops open connections, so a keep-alive socket
+  cannot stall pi's awaited `session_shutdown`.
+
+### Security
+
+- Forensic dumps hold the full prompt (system prompt, messages, tool output,
+  injected memory). Dump files are now written `0600` and a dump directory
+  the extension creates is `0700`, and the README warns never to point
+  `BEDROCK_MANTLE_EMPTY_DUMP_DIR` inside a git repository.
+- The model cache only accepts a `baseUrl` on the extension's own loopback
+  proxy (`http://127.0.0.1:` plus a port placeholder and a known route). Any
+  other value rejects the cache and the curated list is used, so a tampered
+  cache cannot send prompts to another host. The cache schema moves to version
+  3, which discards caches written before this check existed.
+- With neither `HOME` nor `XDG_CACHE_HOME` set (and no
+  `BEDROCK_MANTLE_MODEL_CACHE`), the model cache is skipped instead of being
+  kept in a shared `tmpdir()/.cache`.
+
+### Removed
+
+- The root-level `scripts-bm-*.mjs` debug probes. They defaulted to a personal
+  AWS profile and read dump files that no longer exist; they never shipped in
+  the npm package.
+- Private session ids and workspace names from the forensics notes, and another
+  extension's profile name from a source comment.
+
+### Known issues
+
+- Stream-mode retry ignores client cancel. The managed `ReadableStream` in
+  `fetchWithStreamingRetry` has no `cancel` handler, so when pi aborts a turn
+  the proxy keeps reading the upstream response, and can still issue the
+  retry, until upstream finishes.
+- The held-back head scan is O(n²). Until a turn commits to actionable
+  output, every chunk rescans the whole held buffer from the start. That is
+  cheap for the usual few-hundred-byte head, but quadratic when a long
+  reasoning prefix is held back.
+- Credentials resolve through a new `fromIni` (or default-chain) provider on
+  every request, with no memoisation across requests. A `credential_process`
+  helper therefore runs once per model call, and discovery runs it once per
+  region.
 
 ## [1.0.2] - 2026-06-04
 
