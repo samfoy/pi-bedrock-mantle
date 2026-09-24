@@ -14,8 +14,8 @@
  *
  * Anthropic models use pi's anthropic-messages driver, GPT-5.x uses pi's
  * openai-responses driver, and GPT OSS / other OpenAI-compatible models use
- * openai-completions. Per-model baseUrl overrides route each model to the
- * right proxy automatically.
+ * openai-completions. Per-model baseUrls route each model to the right proxy,
+ * and every request re-resolves the live port (see liveBaseUrl).
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 export default function bedrockMantleExtension(pi: ExtensionAPI): void;

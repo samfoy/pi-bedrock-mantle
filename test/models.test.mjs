@@ -9,6 +9,7 @@ import {
   FALLBACK_MODELS_RAW,
   fastModels,
   fetchModels,
+  liveBaseUrl,
   writeCachedModels,
 } from "../.tmp-test/models.js";
 import { setLogLevel } from "../.tmp-test/log.js";
@@ -357,4 +358,31 @@ test("cache round trip keeps each model on the region proxy discovery chose", as
     assert.equal(baseUrl(fromCache, "openai.gpt-oss-20b"), `http://127.0.0.1:${restarted.cmh}/v1`);
     assert.equal(baseUrl(fromCache, "anthropic.claude-opus-4-7"), `http://127.0.0.1:${restarted.iad}/anthropic`);
   });
+});
+
+test("liveBaseUrl moves a placeholder or stale loopback port to the live proxy of the model's region", () => {
+  const ports = { cmh: 41001, iad: 41002 };
+  // gpt-oss-120b as discovery routed it: us-east-1 only, so the IAD proxy.
+  const live = { ports, models: [{ id: "openai.gpt-oss-120b", baseUrl: `http://127.0.0.1:${ports.iad}/v1` }] };
+  for (const stale of ["http://127.0.0.1:0/v1", "http://127.0.0.1:39999/v1", `http://127.0.0.1:${ports.cmh}/v1`]) {
+    assert.equal(liveBaseUrl({ id: "openai.gpt-oss-120b", baseUrl: stale }, live), `http://127.0.0.1:${ports.iad}/v1`);
+  }
+  // A model the live list no longer carries routes by its API path.
+  assert.equal(liveBaseUrl({ id: "anthropic.gone", baseUrl: "http://127.0.0.1:0/anthropic" }, live),
+    `http://127.0.0.1:${ports.iad}/anthropic`);
+  assert.equal(liveBaseUrl({ id: "deepseek.gone", baseUrl: "http://127.0.0.1:0/openai/v1" }, live),
+    `http://127.0.0.1:${ports.cmh}/openai/v1`);
+});
+
+test("liveBaseUrl leaves a non-loopback baseUrl alone", () => {
+  const model = { id: "openai.gpt-oss-120b", baseUrl: "https://mantle.example.test/v1" };
+  assert.equal(liveBaseUrl(model, undefined), model.baseUrl);
+});
+
+test("liveBaseUrl fails clearly when no proxy is live for the model", () => {
+  const model = { id: "openai.gpt-oss-120b", baseUrl: "http://127.0.0.1:0/v1" };
+  assert.throws(() => liveBaseUrl(model, undefined), /no proxy is running for openai\.gpt-oss-120b/);
+  // Its region's proxy failed to bind: registered on port 0.
+  const live = { ports: { cmh: 0, iad: 41002 }, models: [model] };
+  assert.throws(() => liveBaseUrl(model, live), /proxy for openai\.gpt-oss-120b failed to bind/);
 });

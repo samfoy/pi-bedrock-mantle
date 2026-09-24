@@ -49,6 +49,19 @@ export interface PiModelConfig {
     headers?: Record<string, string>;
     thinkingLevelMap?: Partial<Record<string, string | null>>;
 }
+/**
+ * The baseUrl a request for `model` must use now. pi keeps copies of a model
+ * from before session_start bound the proxies (port 0) or from an earlier
+ * session's proxies, e.g. the scoped models Ctrl+P cycles through, so a
+ * loopback port is re-read from the live registration of the same id.
+ */
+export declare function liveBaseUrl(model: {
+    id: string;
+    baseUrl: string;
+}, live: {
+    ports: ProxyPorts;
+    models: readonly PiModelConfig[];
+} | undefined): string;
 export declare function readCachedModels(ports: ProxyPorts, options?: {
     maxAgeMs?: number;
 }): PiModelConfig[] | null;

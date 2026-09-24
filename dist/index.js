@@ -14,10 +14,11 @@
  *
  * Anthropic models use pi's anthropic-messages driver, GPT-5.x uses pi's
  * openai-responses driver, and GPT OSS / other OpenAI-compatible models use
- * openai-completions. Per-model baseUrl overrides route each model to the
- * right proxy automatically.
+ * openai-completions. Per-model baseUrls route each model to the right proxy,
+ * and every request re-resolves the live port (see liveBaseUrl).
  */
-import { discoverModels, fastModels, writeCachedModels, } from "./models.js";
+import { anthropicMessagesApi, createProvider, lazyStream, openAICompletionsApi, openAIResponsesApi, } from "@earendil-works/pi-ai/compat";
+import { discoverModels, fastModels, liveBaseUrl, writeCachedModels, } from "./models.js";
 import { createSigningProxy, PROXY_PORT_CMH, PROXY_PORT_IAD, } from "./proxy.js";
 import { log } from "./log.js";
 /**
@@ -46,32 +47,55 @@ async function startProxies() {
         cmh,
         iad,
         ports: {
-            // 0 means "not bound" — models gated to a missing region will be filtered
-            // out / show with an unreachable baseUrl, which surfaces as a clear
-            // network error rather than a silent failure.
+            // 0 means "not bound": liveBaseUrl rejects requests for that region.
             cmh: cmh?.port ?? 0,
             iad: iad?.port ?? 0,
         },
     };
 }
-function registerBedrockMantleProvider(pi, models, ports) {
-    // Pick a baseUrl that points at any live proxy — pi requires a provider-level
-    // baseUrl even though every model overrides it. Prefer the CMH proxy (more
-    // models route there); fall back to IAD; if neither is up, register a stub
-    // baseUrl that will surface ECONNREFUSED on the first request rather than
-    // failing extension load.
-    const fallbackPort = ports.cmh || ports.iad || 0;
-    pi.registerProvider("bedrock-mantle", {
-        name: "Bedrock Mantle",
-        baseUrl: `http://127.0.0.1:${fallbackPort}/v1`,
-        api: "openai-completions",
-        // apiKey required by pi's schema; unused — SigV4 auth is handled by the proxies.
-        apiKey: "sigv4-via-proxy",
-        authHeader: false,
-        models,
-    });
+const PROVIDER_ID = "bedrock-mantle";
+// pi's drivers need an API key; the proxies drop it and sign with SigV4.
+const SIGV4_AUTH = {
+    apiKey: {
+        name: "AWS credentials (SigV4)",
+        resolve: async () => ({ auth: { apiKey: "sigv4-via-proxy" }, source: "AWS credentials via the SigV4 proxy" }),
+    },
+};
+const API_STREAMS = {
+    "anthropic-messages": anthropicMessagesApi(),
+    "openai-responses": openAIResponsesApi(),
+    "openai-completions": openAICompletionsApi(),
+};
+/** pi's API streams, sending each request to the live proxy whatever port the model object names. */
+function viaLiveProxy(baseUrlFor) {
+    const live = (model) => ({ ...model, baseUrl: baseUrlFor(model) });
+    return Object.fromEntries(Object.entries(API_STREAMS).map(([api, streams]) => [api, {
+            stream: (model, context, options) => lazyStream(model, async () => streams.stream(live(model), context, options)),
+            streamSimple: (model, context, options) => lazyStream(model, async () => streams.streamSimple(live(model), context, options)),
+        }]));
 }
-/** Ports before session_start binds the proxies: a request fails fast with a connection error. */
+function toModel(config, providerBaseUrl) {
+    return {
+        ...config,
+        api: config.api ?? "openai-completions",
+        baseUrl: config.baseUrl ?? providerBaseUrl,
+        provider: PROVIDER_ID,
+        thinkingLevelMap: config.thinkingLevelMap,
+    };
+}
+function registerBedrockMantleProvider(pi, models, ports, api) {
+    // Prefer the CMH proxy (more models route there); port 0 until one binds.
+    const baseUrl = `http://127.0.0.1:${ports.cmh || ports.iad || 0}/v1`;
+    pi.registerProvider(createProvider({
+        id: PROVIDER_ID,
+        name: "Bedrock Mantle",
+        baseUrl,
+        auth: SIGV4_AUTH,
+        models: models.map((model) => toModel(model, baseUrl)),
+        api,
+    }));
+}
+/** Ports before session_start binds the proxies; liveBaseUrl rejects requests until then. */
 const UNBOUND = { cmh: 0, iad: 0 };
 function closeProxies(setup) {
     return Promise.allSettled([setup.cmh?.close(), setup.iad?.close()]);
@@ -80,10 +104,17 @@ export default function bedrockMantleExtension(pi) {
     const profile = process.env.BEDROCK_MANTLE_AWS_PROFILE;
     let setup;
     let shutDown = false;
+    let registered = [];
+    // Read at request time: the proxies up now and the latest registration.
+    const api = viaLiveProxy((model) => liveBaseUrl(model, setup && { ports: setup.ports, models: registered }));
+    const register = (models, ports) => {
+        registerBedrockMantleProvider(pi, models, ports, api);
+        registered = models;
+    };
     // Register now so `--model` / `--list-models` resolve during startup. Sockets
     // wait for session_start: pi's lifecycle contract forbids them in the factory,
     // since some invocations load extensions without starting a session.
-    registerBedrockMantleProvider(pi, fastModels(UNBOUND), UNBOUND);
+    register(fastModels(UNBOUND), UNBOUND);
     pi.on("session_start", async () => {
         if (setup || shutDown)
             return;
@@ -102,16 +133,17 @@ export default function bedrockMantleExtension(pi) {
             iad_port: started.iad?.port,
             profile: profile ?? "default-credential-chain",
         });
-        // Re-register with the bound ports; pi refreshes the selected model from
-        // the registry. Live discovery runs in the background.
-        registerBedrockMantleProvider(pi, fastModels(started.ports), started.ports);
+        // Re-register with the bound ports. pi refreshes only the selected model
+        // from the registry, so requests re-resolve the port of any stale copy.
+        // Live discovery runs in the background.
+        register(fastModels(started.ports), started.ports);
         void (async () => {
             try {
                 const models = await discoverModels(started.ports);
                 // The runtime is stale after shutdown: registering would throw.
                 if (shutDown)
                     return;
-                registerBedrockMantleProvider(pi, models, started.ports);
+                register(models, started.ports);
                 try {
                     writeCachedModels(models, started.ports);
                 }

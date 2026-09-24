@@ -109,6 +109,31 @@ function applyPorts(models, ports) {
     });
 }
 /**
+ * The baseUrl a request for `model` must use now. pi keeps copies of a model
+ * from before session_start bound the proxies (port 0) or from an earlier
+ * session's proxies, e.g. the scoped models Ctrl+P cycles through, so a
+ * loopback port is re-read from the live registration of the same id.
+ */
+export function liveBaseUrl(model, live) {
+    const url = new URL(model.baseUrl);
+    // Not this extension's proxy, e.g. a models.json override: leave it alone.
+    if (url.hostname !== "127.0.0.1")
+        return model.baseUrl;
+    if (!live) {
+        throw new Error(`bedrock-mantle: no proxy is running for ${model.id}; the pi session has not started or has shut down`);
+    }
+    const registered = live.models.find((m) => m.id === model.id)?.baseUrl;
+    // A model the live list dropped still routes by API: Anthropic is us-east-1 only.
+    const port = registered
+        ? Number(new URL(registered).port)
+        : url.pathname.startsWith("/anthropic") ? live.ports.iad : live.ports.cmh;
+    if (!port) {
+        throw new Error(`bedrock-mantle: the proxy for ${model.id} failed to bind; see the bedrock-mantle log`);
+    }
+    url.port = String(port);
+    return url.href;
+}
+/**
  * Read the raw cache (with placeholder baseUrls) without rehydrating ports.
  * Mostly useful for tests; production code should call `readCachedModels`.
  */
