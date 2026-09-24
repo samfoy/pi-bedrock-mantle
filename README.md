@@ -169,11 +169,15 @@ ignored for routing and signing, so the profile does not need one.
 
 **Models don't appear** — extension not loading. Check that the path in `settings.json` is correct and `npm install` has been run.
 
-**`[bedrock-mantle] level=warn kind=discovery_failed`** — AWS creds unavailable at startup. Models fall back to the cached or curated static list.
+**`[bedrock-mantle] level=warn kind=discovery_failed`** — the model list could not be fetched at startup. The `error` field names each region's cause: a credential error, `HTTP 401` or `HTTP 403` (below). Models fall back to the cached or curated static list.
 
-**HTTP 401** — role doesn't have `bedrock-mantle:CreateInference`. Use a role whose policy grants Bedrock Mantle access.
+The proxy passes Bedrock Mantle's status and error body through to pi unchanged, and logs each failure as `level=warn kind=request ... status=<code>`.
 
-**HTTP 403** — account not allowlisted for bedrock-mantle.
+**HTTP 401** — the credentials were not accepted: they are invalid or expired, or the request was unsigned or malformed. Refresh them (for example `aws sso login`, or whatever feeds your `credential_process`) and check that `BEDROCK_MANTLE_AWS_PROFILE` names the profile you expect. Credentials are resolved on every request, so the next prompt picks up new ones without restarting pi.
+
+**HTTP 403 or `AccessDenied`** — the credentials are valid, but the identity lacks permission: its policy does not allow `bedrock-mantle:CreateInference` (the AWS managed policy `AmazonBedrockMantleInferenceAccess` grants it), or the account has no access to that model. Use a role whose policy grants Bedrock Mantle inference.
+
+**HTTP 500 with `"type":"proxy_error"`** — the request never reached Bedrock Mantle. The proxy could not sign or send it, usually because no credentials could be resolved (for example `Could not resolve credentials using profile`, or an expired SSO session). The message names the cause, and the log line is `level=error kind=request_failed`.
 
 **Proxy port conflict** — by default, each pi process binds its own ephemeral ports, so port conflicts are impossible. If you've explicitly pinned `BEDROCK_MANTLE_PROXY_PORT_CMH` or `BEDROCK_MANTLE_PROXY_PORT_IAD` to a fixed value (e.g. for an external consumer that needs a stable URL), and that port is taken, change the value or unset the env var to fall back to ephemeral.
 
