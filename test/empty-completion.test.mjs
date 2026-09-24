@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   inspectResponseCompleted,
@@ -256,6 +259,42 @@ describe("maybeDetectEmptyCompletion (wiring)", () => {
     assert.match(stderr, /output_tokens=0/);
 
     setLogLevel("info");
+  });
+
+  test("detected empty is dumped under an expanded ~ with private permissions", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bm-home-"));
+    const saved = { HOME: process.env.HOME, DIR: process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR };
+    process.env.HOME = home;
+    process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR = "~/dumps";
+    // A permissive umask, so only the explicit modes can make the dump private.
+    const savedMask = process.umask(0o022);
+    setLogLevel("silent");
+    try {
+      const { response } = maybeDetectEmptyCompletion(sseResponse([
+        'event: response.completed\ndata: {"response":{"status":"completed","output":[{"type":"reasoning"}],"usage":{"output_tokens":0}}}\n\n',
+      ]), {
+        requestId: "req-dump-1",
+        region: "us-east-2",
+        path: "/openai/v1/responses",
+        requestBody: JSON.stringify({ input: "the full prompt" }),
+      });
+      await response.text();
+      await new Promise((resolve) => setImmediate(resolve));
+      const dir = join(home, "dumps");
+      assert.deepEqual(readdirSync(dir), ["empty-req-dump-1.json"]);
+      const dump = JSON.parse(readFileSync(join(dir, "empty-req-dump-1.json"), "utf-8"));
+      assert.deepEqual(dump.request, { input: "the full prompt" });
+      assert.equal(statSync(dir).mode & 0o777, 0o700);
+      assert.equal(statSync(join(dir, "empty-req-dump-1.json")).mode & 0o777, 0o600);
+      assert.equal(existsSync("~"), false, "no ./~ directory in the working tree");
+    } finally {
+      process.umask(savedMask);
+      process.env.HOME = saved.HOME;
+      if (saved.DIR === undefined) delete process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR;
+      else process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR = saved.DIR;
+      rmSync(home, { recursive: true, force: true });
+      setLogLevel("info");
+    }
   });
 
   test("SSE response with normal completion does NOT log empty_completion", async () => {

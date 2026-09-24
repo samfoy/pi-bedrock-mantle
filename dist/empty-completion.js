@@ -26,9 +26,7 @@
  *     so the SSE path covers production. A non-stream pass-through stays a
  *     pass-through; we just don't add detection there yet.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { log } from "./log.js";
+import { log, writeDump } from "./log.js";
 /**
  * If `upstream` is an SSE response on the openai-responses path, return a
  * `{ response, dispose }` pair whose response body is teed and scanned for
@@ -175,12 +173,9 @@ function handleSseEvent(event, ctx) {
  * affect the user-visible response.
  */
 function maybeDumpPayload(ctx, payload) {
-    const dir = process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR;
-    if (!dir)
+    if (!process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR)
         return;
     try {
-        mkdirSync(dir, { recursive: true });
-        const path = join(dir, `empty-${ctx.requestId}.json`);
         let requestPayload;
         if (ctx.requestBody !== undefined) {
             const bodyStr = typeof ctx.requestBody === "string"
@@ -193,14 +188,16 @@ function maybeDumpPayload(ctx, payload) {
                 requestPayload = bodyStr;
             }
         }
-        writeFileSync(path, JSON.stringify({
+        const path = writeDump(`empty-${ctx.requestId}.json`, {
             capturedAt: new Date().toISOString(),
             region: ctx.region,
             path: ctx.path,
             requestId: ctx.requestId,
             request: requestPayload,
             response: payload,
-        }, null, 2));
+        });
+        if (!path)
+            return;
         log.info("empty_completion_dump", { id: ctx.requestId, path });
     }
     catch (err) {

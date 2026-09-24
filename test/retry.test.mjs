@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -346,6 +346,37 @@ describe("empty-completion capture (no terminal / non-SSE)", () => {
       setRetryMode(undefined);
       setLogLevel("info");
     });
+  });
+
+  test("dump dir: ~ expands to HOME, dir 0700, file 0600", async () => {
+    const home = mkdtempSync(join(tmpdir(), "bm-home-"));
+    const saved = { HOME: process.env.HOME, DIR: process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR };
+    process.env.HOME = home;
+    process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR = "~/dumps";
+    // A permissive umask, so only the explicit modes can make the dump private.
+    const savedMask = process.umask(0o022);
+    try {
+      setRetryMode(true);
+      setLogLevel("silent");
+      await withMockedFetch(
+        [() => sseResponse(noTerminalEvents())],
+        () => fetchWithEmptyRetry(SAMPLE_INPUT, SAMPLE_CTX),
+      );
+      const dir = join(home, "dumps");
+      const files = readdirSync(dir).filter((f) => f.startsWith("no_terminal-"));
+      assert.equal(files.length, 1, "dump landed under HOME");
+      assert.equal(statSync(dir).mode & 0o777, 0o700);
+      assert.equal(statSync(join(dir, files[0])).mode & 0o777, 0o600);
+      assert.equal(existsSync("~"), false, "no ./~ directory in the working tree");
+    } finally {
+      process.umask(savedMask);
+      process.env.HOME = saved.HOME;
+      if (saved.DIR === undefined) delete process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR;
+      else process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR = saved.DIR;
+      rmSync(home, { recursive: true, force: true });
+      setRetryMode(undefined);
+      setLogLevel("info");
+    }
   });
 
   test("non-SSE 200: warns + dumps when EMPTY_DUMP_DIR set, passes through", async () => {

@@ -41,10 +41,8 @@
  *   - unset (default)                          → retry ON.
  */
 import { inspectResponseCompleted } from "./empty-completion.js";
-import { log } from "./log.js";
+import { log, writeDump } from "./log.js";
 import { signAndForward } from "./proxy.js";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 let retryOverride;
 export function setRetryMode(mode) {
     if (mode === undefined)
@@ -467,12 +465,9 @@ function rebuildResponse(original, bytes) {
  * the user-visible response.
  */
 function maybeDumpBuffer(ctx, label, bytes, requestBody) {
-    const dir = process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR;
-    if (!dir)
+    if (!process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR)
         return;
     try {
-        mkdirSync(dir, { recursive: true });
-        const path = join(dir, `${label}-${ctx.requestId}.json`);
         let request;
         if (requestBody !== undefined) {
             const bodyStr = typeof requestBody === "string" ? requestBody : requestBody.toString("utf-8");
@@ -483,7 +478,7 @@ function maybeDumpBuffer(ctx, label, bytes, requestBody) {
                 request = bodyStr;
             }
         }
-        writeFileSync(path, JSON.stringify({
+        const path = writeDump(`${label}-${ctx.requestId}.json`, {
             capturedAt: new Date().toISOString(),
             label,
             region: ctx.region,
@@ -492,7 +487,9 @@ function maybeDumpBuffer(ctx, label, bytes, requestBody) {
             request,
             responseBytes: bytes.byteLength,
             responseText: new TextDecoder().decode(bytes),
-        }, null, 2));
+        });
+        if (!path)
+            return;
         log.info("empty_completion_dump", { id: ctx.requestId, path, label });
     }
     catch (err) {

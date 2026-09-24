@@ -226,6 +226,12 @@ Log lines on retry (both modes):
 
 ### Capturing empty-completion variants (`BEDROCK_MANTLE_EMPTY_DUMP_DIR`)
 
+> **Warning:** a dump contains the **full prompt**: the system prompt, every message, tool
+> output, and anything a memory or context extension injected. Never point
+> `BEDROCK_MANTLE_EMPTY_DUMP_DIR` inside a git repository or any other
+> directory that gets shared, synced or committed. Leave it unset unless you
+> are actively debugging, and delete the dumps when you are done.
+
 Not every empty manifests as a `response.completed` with empty output. Two
 other shapes are passed through (not retried) but **captured** for forensics
 when `BEDROCK_MANTLE_EMPTY_DUMP_DIR` is set:
@@ -239,10 +245,12 @@ when `BEDROCK_MANTLE_EMPTY_DUMP_DIR` is set:
 BEDROCK_MANTLE_EMPTY_DUMP_DIR=~/.pi/logs/empty-dumps
 ```
 
-Each capture writes `<dir>/<label>-<requestId>.json` with the full request
-body and raw response bytes, so the exact shape can be analysed before
-extending retry to cover it. Detected empties (`kind=empty_completion`) are
-also dumped here. Errors (4xx/5xx) are never dumped.
+A leading `~` expands to your home directory. Each capture writes
+`<dir>/<label>-<requestId>.json` with the full request body and raw response
+bytes, so the exact shape can be analysed before extending retry to cover it.
+Files are created with mode `0600`, and a directory the extension creates gets
+`0700`. Detected empties (`kind=empty_completion`) are also dumped here.
+Errors (4xx/5xx) are never dumped.
 
 ### Transient `response.failed` retry
 

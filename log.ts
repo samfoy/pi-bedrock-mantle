@@ -16,9 +16,9 @@
  *     application stdout (matters when pi consumers pipe stdout).
  */
 
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 export type LogLevel = "silent" | "error" | "warn" | "info" | "debug";
 
@@ -157,6 +157,24 @@ function writeToFileSink(line: string): void {
       `[bedrock-mantle] level=warn kind=log_file_error path=${JSON.stringify(path)} error=${JSON.stringify(reason)}\n`,
     );
   }
+}
+
+// ─── Forensic dumps ─────────────────────────────────────────────────────────
+
+/**
+ * Write `payload` as JSON to `$BEDROCK_MANTLE_EMPTY_DUMP_DIR/<fileName>` and
+ * return the path, or `undefined` when the variable is unset. Dumps carry the
+ * full prompt, so a directory this creates is 0700 and every file is 0600.
+ * Throws on I/O failure; callers log and carry on.
+ */
+export function writeDump(fileName: string, payload: unknown): string | undefined {
+  const raw = process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR?.trim();
+  if (!raw) return undefined;
+  const dir = expandHome(raw);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const path = join(dir, fileName);
+  writeFileSync(path, JSON.stringify(payload, null, 2), { mode: 0o600 });
+  return path;
 }
 
 export const log = {

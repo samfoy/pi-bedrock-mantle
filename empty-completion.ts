@@ -27,9 +27,7 @@
  *     pass-through; we just don't add detection there yet.
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { log } from "./log.js";
+import { log, writeDump } from "./log.js";
 
 /** Context carried into the detector so log lines correlate to the proxy request. */
 export interface EmptyCompletionContext {
@@ -215,11 +213,8 @@ function handleSseEvent(event: SseEvent, ctx: EmptyCompletionContext): void {
  * affect the user-visible response.
  */
 function maybeDumpPayload(ctx: EmptyCompletionContext, payload: unknown): void {
-  const dir = process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR;
-  if (!dir) return;
+  if (!process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR) return;
   try {
-    mkdirSync(dir, { recursive: true });
-    const path = join(dir, `empty-${ctx.requestId}.json`);
     let requestPayload: unknown;
     if (ctx.requestBody !== undefined) {
       const bodyStr = typeof ctx.requestBody === "string"
@@ -231,14 +226,15 @@ function maybeDumpPayload(ctx: EmptyCompletionContext, payload: unknown): void {
         requestPayload = bodyStr;
       }
     }
-    writeFileSync(path, JSON.stringify({
+    const path = writeDump(`empty-${ctx.requestId}.json`, {
       capturedAt: new Date().toISOString(),
       region: ctx.region,
       path: ctx.path,
       requestId: ctx.requestId,
       request: requestPayload,
       response: payload,
-    }, null, 2));
+    });
+    if (!path) return;
     log.info("empty_completion_dump", { id: ctx.requestId, path });
   } catch (err) {
     log.debug("empty_completion_dump_failed", {

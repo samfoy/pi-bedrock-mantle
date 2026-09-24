@@ -26,6 +26,13 @@ export declare function getLogLevel(): LogLevel;
  * state and short-circuits env resolution.
  */
 export declare function setLogFile(path: string | undefined): void;
+/**
+ * Write `payload` as JSON to `$BEDROCK_MANTLE_EMPTY_DUMP_DIR/<fileName>` and
+ * return the path, or `undefined` when the variable is unset. Dumps carry the
+ * full prompt, so a directory this creates is 0700 and every file is 0600.
+ * Throws on I/O failure; callers log and carry on.
+ */
+export declare function writeDump(fileName: string, payload: unknown): string | undefined;
 export declare const log: {
     error(kind: string, fields?: Record<string, unknown>): void;
     warn(kind: string, fields?: Record<string, unknown>): void;

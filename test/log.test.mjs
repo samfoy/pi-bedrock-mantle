@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { getLogLevel, log, newRequestId, setLogFile, setLogLevel } from "../.tmp-test/log.js";
-import { mkdtempSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { getLogLevel, log, newRequestId, setLogFile, setLogLevel, writeDump } from "../.tmp-test/log.js";
+import { mkdtempSync, readFileSync, existsSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -196,6 +196,49 @@ describe("file sink", () => {
       setLogLevel("info");
       const out = captureStderr(() => log.warn("warn_kind", { a: 1 }));
       assert.match(out, /kind=warn_kind a=1/);
+    });
+  });
+});
+
+describe("writeDump (BEDROCK_MANTLE_EMPTY_DUMP_DIR)", () => {
+  // Point HOME at a temp dir so "~" resolves somewhere disposable.
+  function withHome(dumpDir, fn) {
+    const home = mkdtempSync(join(tmpdir(), "bm-home-"));
+    const saved = { HOME: process.env.HOME, DIR: process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR };
+    process.env.HOME = home;
+    // A permissive umask, so only the explicit modes can make the dump private.
+    const savedMask = process.umask(0o022);
+    if (dumpDir === undefined) delete process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR;
+    else process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR = dumpDir;
+    try {
+      return fn(home);
+    } finally {
+      process.umask(savedMask);
+      process.env.HOME = saved.HOME;
+      if (saved.DIR === undefined) delete process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR;
+      else process.env.BEDROCK_MANTLE_EMPTY_DUMP_DIR = saved.DIR;
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+
+  test("returns undefined and writes nothing when the variable is unset", () => {
+    withHome(undefined, () => assert.equal(writeDump("x.json", {}), undefined));
+  });
+
+  test("expands ~ to HOME instead of creating a literal ./~ directory", () => {
+    withHome("~/dumps/nested", (home) => {
+      const path = writeDump("probe.json", { request: "secret prompt" });
+      assert.equal(path, join(home, "dumps", "nested", "probe.json"));
+      assert.deepEqual(JSON.parse(readFileSync(path, "utf-8")), { request: "secret prompt" });
+      assert.equal(existsSync("~"), false, "no ./~ directory in the working tree");
+    });
+  });
+
+  test("creates the directory 0700 and the file 0600", () => {
+    withHome("~/dumps", (home) => {
+      const path = writeDump("probe.json", {});
+      assert.equal(statSync(join(home, "dumps")).mode & 0o777, 0o700);
+      assert.equal(statSync(path).mode & 0o777, 0o600);
     });
   });
 });
