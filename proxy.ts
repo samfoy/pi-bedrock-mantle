@@ -95,8 +95,8 @@ const DROP_RESPONSE = new Set([
 function makeSigner(region: string): SignatureV4 {
   const profile = process.env.BEDROCK_MANTLE_AWS_PROFILE;
   // Use fromIni when an explicit profile is set — fromNodeProviderChain reads
-  // AWS_PROFILE from env which may be clobbered by other extensions
-  // (e.g. pi-provider-claude-code sets AWS_PROFILE=claude-code-DO-NOT-DELETE).
+  // AWS_PROFILE from env, which another extension may set to a profile of its
+  // own.
   const credentials = profile
     ? fromIni({ profile })
     : fromNodeProviderChain();

@@ -150,16 +150,19 @@ Bottom line: there's no clever request-shape fix. Mitigation #2
 (retry-on-empty in bedrock-mantle) is the right ship.
 
 ## Forensic artifacts
-- `empty-Dq2O4ioeXlTD.json`, `empty-SgX04t2zwY3s.json` — captured request +
-  response payloads from production pi runs that hit the bug
+
+None of these ship any more. The captured request + response dumps were purged
+because they held full prompts, and the `scripts-bm-*.mjs` probes named in this
+document were removed in 1.1.0 (they are still in git history before it):
+
 - `scripts-bm-direct.mjs` — sign + POST a hand-crafted body, no pi
 - `scripts-bm-replay.mjs` — replay a captured request N times
 - `scripts-bm-variants.mjs` — sweep model/effort variants of a captured request
 
 ## Followup: second empty variant — reasoning-burn with output_tokens > 0 (2026-06-08)
 
-Confirmed live in session `019ea873` (Rosie workspace, gpt-5.5 on
-openai-responses): gpt-5.5 made a tool call at 18:17:20, then the next turn
+Confirmed live in a pi session (gpt-5.5 on openai-responses): gpt-5.5 made
+a tool call at 18:17:20, then the next turn
 went idle (no message, no tool call). Sam manually swapped to
 claude-opus-4-8 at 18:17:44 and re-prompted; Claude ran clean to completion.
 
@@ -186,8 +189,8 @@ response.completed" third variant — now logged at debug as
 ## Followup: the "empty stream" is actually `response.failed` (server_error) (2026-06-08)
 
 Captured the real payload after wiring up `BEDROCK_MANTLE_EMPTY_DUMP_DIR` on
-the dashboard slots. Four `no_terminal` dumps from session `019ea8f2`
-(oncall-triage, gpt-5.5) are all the **same shape**, and it is **not** the
+the dashboard slots. Four `no_terminal` dumps from one pi session
+(gpt-5.5) are all the **same shape**, and it is **not** the
 empty-completion bug:
 
 ```

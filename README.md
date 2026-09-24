@@ -115,7 +115,7 @@ The extension and proxy first honor `BEDROCK_MANTLE_AWS_PROFILE` via `fromIni({ 
 The extension logs to stderr with a leveled, key=value format:
 
 ```
-[bedrock-mantle] level=info kind=ready cmh_port=54321 iad_port=54322 profile=openclaw-bedrock
+[bedrock-mantle] level=info kind=ready cmh_port=54321 iad_port=54322 profile=bedrock-mantle
 [bedrock-mantle] level=debug kind=request id=Az3kP9 region=us-east-2 method=POST path=/openai/v1/responses status=200 latency_ms=412 bytes_in=2851 bytes_out=18432
 [bedrock-mantle] level=warn kind=request id=Bx7mQ2 region=us-east-1 status=403 latency_ms=98
 ```
