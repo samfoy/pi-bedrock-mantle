@@ -22,7 +22,6 @@
  */
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Sha256 } from "@aws-crypto/sha256-js";
 import { fromIni, fromNodeProviderChain } from "@aws-sdk/credential-providers";
@@ -56,7 +55,7 @@ export interface PiModelConfig {
 }
 
 interface CachedModels {
-  version: 2;
+  version: typeof CACHE_VERSION;
   generatedAt: number;
   /**
    * Cached entries store baseUrls relative to a port placeholder rather than
@@ -71,7 +70,8 @@ interface CachedModels {
   models: PiModelConfig[];
 }
 
-const CACHE_VERSION = 2;
+// 3: baseUrls are validated on read; caches from earlier versions are discarded.
+const CACHE_VERSION = 3;
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const CACHE_ENV = "BEDROCK_MANTLE_MODEL_CACHE";
 const CMH_PLACEHOLDER = "{{CMH_PORT}}";
@@ -90,16 +90,30 @@ function requestedPorts(): ProxyPorts {
   };
 }
 
-function cachePath(): string {
+/**
+ * Where the model cache lives, or `undefined` to skip caching. Without HOME
+ * there is no per-user location, and a shared dir like tmpdir() would let
+ * another local user plant the model list this process trusts.
+ */
+function cachePath(): string | undefined {
   if (process.env[CACHE_ENV]) return process.env[CACHE_ENV]!;
-  const root = process.env.XDG_CACHE_HOME ?? join(process.env.HOME ?? tmpdir(), ".cache");
-  return join(root, "pi-bedrock-mantle", "models.json");
+  const root = process.env.XDG_CACHE_HOME ||
+    (process.env.HOME ? join(process.env.HOME, ".cache") : undefined);
+  return root ? join(root, "pi-bedrock-mantle", "models.json") : undefined;
 }
+
+/**
+ * The only baseUrls a cache may hold: a port placeholder on the loopback
+ * proxy plus a route buildConfig() emits. Anything else would let a tampered
+ * cache send prompts, unsigned, to another host.
+ */
+const CACHED_BASE_URL = /^http:\/\/127\.0\.0\.1:\{\{(?:CMH|IAD)_PORT\}\}\/(?:anthropic|openai\/v1|v1)$/;
 
 function isModelConfig(value: unknown): value is PiModelConfig {
   if (!value || typeof value !== "object") return false;
   const model = value as Partial<PiModelConfig>;
-  return typeof model.id === "string" &&
+  return typeof model.baseUrl === "string" && CACHED_BASE_URL.test(model.baseUrl) &&
+    typeof model.id === "string" &&
     typeof model.name === "string" &&
     typeof model.contextWindow === "number" &&
     typeof model.maxTokens === "number" &&
@@ -142,9 +156,11 @@ function applyPorts(models: PiModelConfig[], ports: ProxyPorts): PiModelConfig[]
  * Mostly useful for tests; production code should call `readCachedModels`.
  */
 function readRawCachedModels(options: { maxAgeMs?: number } = {}): PiModelConfig[] | null {
+  const path = cachePath();
+  if (!path) return null;
   const cached = (() => {
     try {
-      return parseCachedModels(readFileSync(cachePath(), "utf8"));
+      return parseCachedModels(readFileSync(path, "utf8"));
     } catch {
       return null;
     }
@@ -166,6 +182,7 @@ export function readCachedModels(
 
 export function writeCachedModels(models: PiModelConfig[], ports: ProxyPorts): void {
   const path = cachePath();
+  if (!path) return;
   mkdirSync(dirname(path), { recursive: true });
   // Swap each bound port for its region placeholder: ports change every run
   // when ephemeral, but the region buildConfig() chose from discovery must

@@ -22,7 +22,7 @@ Dynamically discovered at startup from the live `/v1/models` endpoint in both re
 - **ZAI**: GLM-4.6, GLM-4.7, GLM-5
 - **Writer**: Palmyra Vision 7B
 
-Falls back to the curated static list in `models.ts` if discovery fails (expired creds at startup). The last successful discovery is cached in `${XDG_CACHE_HOME:-~/.cache}/pi-bedrock-mantle/models.json` (override the path with `BEDROCK_MANTLE_MODEL_CACHE`) and used on the next start while discovery refreshes in the background.
+Falls back to the curated static list in `models.ts` if discovery fails (expired creds at startup). The last successful discovery is cached in `${XDG_CACHE_HOME:-~/.cache}/pi-bedrock-mantle/models.json` (override the path with `BEDROCK_MANTLE_MODEL_CACHE`) and used on the next start while discovery refreshes in the background. A cached entry whose `baseUrl` is not one of the extension's own loopback proxy routes is rejected, and the whole cache falls back to the curated list. With neither `HOME` nor `XDG_CACHE_HOME` set, caching is skipped.
 
 ## How it works
 

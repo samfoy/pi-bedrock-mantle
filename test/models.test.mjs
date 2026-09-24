@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -39,6 +41,20 @@ function withFakeAwsCredentials() {
   // Reset port pins so the cache key is consistent across tests.
   delete process.env.BEDROCK_MANTLE_PROXY_PORT_CMH;
   delete process.env.BEDROCK_MANTLE_PROXY_PORT_IAD;
+}
+
+const CURATED_IDS = FALLBACK_MODELS_RAW.map((model) => model.id).sort();
+
+/** Write a current-schema cache to `path`, with `overrides` on top. */
+function writeCacheFile(path, overrides = {}) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify({
+    version: 3,
+    generatedAt: Date.now(),
+    proxyPorts: { cmh: 0, iad: 0 },
+    models: [FALLBACK_MODELS_RAW.find((model) => model.id === "openai.gpt-oss-20b")],
+    ...overrides,
+  }));
 }
 
 async function withMockedFetch(resolver, fn) {
@@ -236,12 +252,7 @@ test("fastModels rejects caches written under a different port pin", () => {
   // Write a cache that claims it was generated when CMH was pinned to 99999
   // (impossible at runtime — we override only the recorded proxyPorts to test
   // the cache-key invalidation).
-  writeFileSync(process.env.BEDROCK_MANTLE_MODEL_CACHE, JSON.stringify({
-    version: 2,
-    generatedAt: Date.now(),
-    proxyPorts: { cmh: 99999, iad: 99998 },
-    models: [FALLBACK_MODELS_RAW.find((model) => model.id === "openai.gpt-oss-20b")],
-  }));
+  writeCacheFile(process.env.BEDROCK_MANTLE_MODEL_CACHE, { proxyPorts: { cmh: 99999, iad: 99998 } });
 
   // Default port-pin is 0/0, so cache should be rejected and we should fall
   // back to the curated list.
@@ -254,18 +265,63 @@ test("fastModels rejects caches written under a different port pin", () => {
 
 test("fastModels rejects caches with a stale schema version", () => {
   withFakeAwsCredentials();
-  writeFileSync(process.env.BEDROCK_MANTLE_MODEL_CACHE, JSON.stringify({
-    version: 1,
-    generatedAt: Date.now(),
-    proxyPorts: { cmh: 0, iad: 0 },
-    models: [FALLBACK_MODELS_RAW.find((model) => model.id === "openai.gpt-oss-20b")],
-  }));
+  // Control: the same cache at the current version is read.
+  writeCacheFile(process.env.BEDROCK_MANTLE_MODEL_CACHE);
+  assert.deepEqual(fastModels(TEST_PORTS).map((model) => model.id), ["openai.gpt-oss-20b"]);
 
-  const models = fastModels(TEST_PORTS);
-  assert.deepEqual(
-    models.map((model) => model.id).sort(),
-    FALLBACK_MODELS_RAW.map((model) => model.id).sort(),
-  );
+  // Version 2 caches predate baseUrl validation and must be discarded.
+  for (const version of [1, 2]) {
+    writeCacheFile(process.env.BEDROCK_MANTLE_MODEL_CACHE, { version });
+    assert.deepEqual(fastModels(TEST_PORTS).map((model) => model.id).sort(), CURATED_IDS, `version ${version}`);
+  }
+});
+
+test("fastModels rejects a cache whose baseUrl leaves the loopback proxy", () => {
+  withFakeAwsCredentials();
+  const model = FALLBACK_MODELS_RAW.find((candidate) => candidate.id === "openai.gpt-oss-20b");
+  const hostile = [
+    "https://attacker.example/v1",
+    "http://attacker.example:{{CMH_PORT}}/v1",
+    "http://localhost:{{CMH_PORT}}/v1",
+    "http://127.0.0.1:{{CMH_PORT}}@attacker.example/v1",
+    "http://127.0.0.1.attacker.example:{{CMH_PORT}}/v1",
+    "http://127.0.0.1:8080/v1",
+    "http://127.0.0.1:{{CMH_PORT}}/v1/../../elsewhere",
+    undefined,
+  ];
+  for (const baseUrl of hostile) {
+    writeCacheFile(process.env.BEDROCK_MANTLE_MODEL_CACHE, { models: [{ ...model, baseUrl }] });
+    const models = fastModels(TEST_PORTS);
+    assert.deepEqual(models.map((m) => m.id).sort(), CURATED_IDS, `fell back to curated for ${baseUrl}`);
+    assert.ok(models.every((m) => m.baseUrl.startsWith("http://127.0.0.1:")), `${baseUrl}: loopback only`);
+  }
+});
+
+test("without HOME the cache is skipped, never placed in a shared tmpdir", () => {
+  withFakeAwsCredentials();
+  const shared = mkdtempSync(join(tmpdir(), "bm-shared-tmp-"));
+  const saved = { HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, XDG: process.env.XDG_CACHE_HOME };
+  delete process.env.BEDROCK_MANTLE_MODEL_CACHE;
+  delete process.env.XDG_CACHE_HOME;
+  delete process.env.HOME;
+  process.env.TMPDIR = shared;
+  try {
+    // Another local user plants a cache where the old code would have looked.
+    const planted = join(tmpdir(), ".cache", "pi-bedrock-mantle", "models.json");
+    assert.ok(planted.startsWith(shared));
+    writeCacheFile(planted);
+    assert.deepEqual(fastModels(TEST_PORTS).map((model) => model.id).sort(), CURATED_IDS);
+
+    rmSync(join(shared, ".cache"), { recursive: true, force: true });
+    writeCachedModels([FALLBACK_MODELS_RAW[0]], TEST_PORTS);
+    assert.deepEqual(readdirSync(shared), [], "nothing written to the shared tmpdir");
+  } finally {
+    for (const [key, value] of Object.entries({ HOME: saved.HOME, TMPDIR: saved.TMPDIR, XDG_CACHE_HOME: saved.XDG })) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(shared, { recursive: true, force: true });
+  }
 });
 
 test("writeCachedModels strips bound ports so the cache survives ephemeral restarts", () => {
