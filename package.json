@@ -1,11 +1,11 @@
 {
   "name": "pi-bedrock-mantle",
-  "private": false,
   "version": "1.0.2",
-  "description": "Pi extension: all Bedrock Mantle models (GPT-5.5, DeepSeek, Qwen3, Mistral, Kimi, ...) via SigV4 — no long-term API key needed",
-  "author": "Sam Fanning",
+  "description": "Pi extension: all Bedrock Mantle models (GPT-5.x, Claude, DeepSeek, Qwen3, Mistral, Kimi, ...) via SigV4 — no long-term API key needed",
+  "author": "Sam Painter",
   "license": "MIT",
   "keywords": [
+    "pi-package",
     "pi",
     "pi-extension",
     "bedrock",
@@ -19,7 +19,14 @@
     "type": "git",
     "url": "git+https://github.com/samfoy/pi-bedrock-mantle.git"
   },
+  "homepage": "https://github.com/samfoy/pi-bedrock-mantle#readme",
+  "bugs": {
+    "url": "https://github.com/samfoy/pi-bedrock-mantle/issues"
+  },
   "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "scripts": {
     "clean": "rm -rf dist .tmp-test",
     "build": "npm run clean && tsc --noEmit false --outDir dist --rootDir .",
@@ -29,6 +36,7 @@
   "files": [
     "dist",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "pi": {
@@ -41,8 +49,16 @@
     "@aws-sdk/credential-providers": "^3.799.0",
     "@smithy/signature-v4": "^5.1.1"
   },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "typescript": "^5.8.0"
+    "@earendil-works/pi-coding-agent": "^0.87.1",
+    "typescript": "^5.9.3"
   }
 }
