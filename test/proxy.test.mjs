@@ -1,3 +1,4 @@
+import { FAKE_ACCESS_KEY_ID } from "./hermetic.mjs";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
@@ -21,27 +22,6 @@ function captureStderr(fn) {
     (result) => { process.stderr.write = original; return { result, stderr: captured.join("") }; },
     (err) => { process.stderr.write = original; throw err; },
   );
-}
-
-function installDummyAwsEnv() {
-  const savedEnv = {
-    AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
-    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
-    AWS_SESSION_TOKEN: process.env.AWS_SESSION_TOKEN,
-    AWS_PROFILE: process.env.AWS_PROFILE,
-    BEDROCK_MANTLE_AWS_PROFILE: process.env.BEDROCK_MANTLE_AWS_PROFILE,
-  };
-  process.env.AWS_ACCESS_KEY_ID = "test";
-  process.env.AWS_SECRET_ACCESS_KEY = "test";
-  delete process.env.AWS_SESSION_TOKEN;
-  delete process.env.AWS_PROFILE;
-  delete process.env.BEDROCK_MANTLE_AWS_PROFILE;
-  return () => {
-    for (const [key, value] of Object.entries(savedEnv)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  };
 }
 
 async function waitFor(predicate, timeoutMs = 500) {
@@ -82,7 +62,6 @@ describe("parsePortEnv", () => {
 
 describe("signAndForward", () => {
   test("signs the request, forwards to the regional bedrock-mantle host, and returns the upstream Response unchanged", async () => {
-    const restoreEnv = installDummyAwsEnv();
     const originalFetch = globalThis.fetch;
     let capturedUrl;
     let capturedHeaders;
@@ -112,19 +91,17 @@ describe("signAndForward", () => {
       assert.equal(capturedUrl, "https://bedrock-mantle.us-east-2.api.aws/openai/v1/responses");
       assert.equal(capturedMethod, "POST");
       // SigV4 must have populated authorization on the forwarded request.
-      assert.match(capturedHeaders?.authorization ?? "", /^AWS4-HMAC-SHA256 Credential=test\//);
+      assert.match(capturedHeaders?.authorization ?? "", new RegExp(`^AWS4-HMAC-SHA256 Credential=${FAKE_ACCESS_KEY_ID}/`));
       // x-* headers must pass through verbatim.
       assert.equal(capturedHeaders?.["x-passthrough"], "yes");
       // Body bytes must reach upstream.
       assert.ok(capturedBody, "expected a body on the forwarded request");
     } finally {
       globalThis.fetch = originalFetch;
-      restoreEnv();
     }
   });
 
   test("drops hop-by-hop and incoming-auth headers before signing", async () => {
-    const restoreEnv = installDummyAwsEnv();
     const originalFetch = globalThis.fetch;
     let captured;
 
@@ -152,7 +129,6 @@ describe("signAndForward", () => {
       assert.equal(captured?.connection, undefined);
     } finally {
       globalThis.fetch = originalFetch;
-      restoreEnv();
     }
   });
 });
@@ -181,7 +157,6 @@ describe("createSigningProxy", () => {
 
 describe("proxy logging", () => {
   test("emits a structured request line at debug level on success and surfaces the request id in response headers", async () => {
-    const restoreEnv = installDummyAwsEnv();
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () => new Response("ok", {
       status: 200,
@@ -208,14 +183,12 @@ describe("proxy logging", () => {
       assert.match(stderr, /upstream_request_id=upstream-abc-123/);
     } finally {
       globalThis.fetch = originalFetch;
-      restoreEnv();
       setLogLevel("info");
       await proxy.close();
     }
   });
 
   test("emits a warn line for upstream non-2xx responses (visible at default info level)", async () => {
-    const restoreEnv = installDummyAwsEnv();
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () => new Response('{"error":"forbidden"}', {
       status: 403,
@@ -237,13 +210,11 @@ describe("proxy logging", () => {
       assert.match(stderr, /status=403/);
     } finally {
       globalThis.fetch = originalFetch;
-      restoreEnv();
       await proxy.close();
     }
   });
 
   test("emits an error line and a structured 500 body when the upstream fetch throws", async () => {
-    const restoreEnv = installDummyAwsEnv();
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async () => { throw new Error("network down"); };
 
@@ -266,7 +237,6 @@ describe("proxy logging", () => {
       assert.match(stderr, /error="network down"/);
     } finally {
       globalThis.fetch = originalFetch;
-      restoreEnv();
       setLogLevel("info");
       await proxy.close();
     }
@@ -276,7 +246,6 @@ describe("proxy logging", () => {
 describe("startProxy (legacy)", () => {
   test("streams upstream SSE chunks without waiting for the full response", async () => {
     const originalFetch = globalThis.fetch;
-    const restoreEnv = installDummyAwsEnv();
     // This test asserts raw incremental streaming on the openai-responses path,
     // which requires the buffer-and-retry layer off (it's on by default).
     const savedRetry = process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
@@ -327,7 +296,6 @@ describe("startProxy (legacy)", () => {
       assert.ok(secondAt >= 100, `second chunk arrived before delayed upstream chunk: ${secondAt}ms`);
     } finally {
       globalThis.fetch = originalFetch;
-      restoreEnv();
       if (savedRetry === undefined) delete process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
       else process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY = savedRetry;
       await proxy.close();
@@ -336,7 +304,6 @@ describe("startProxy (legacy)", () => {
 
   test("cancels the upstream reader when the downstream client disconnects mid-stream", async () => {
     const originalFetch = globalThis.fetch;
-    const restoreEnv = installDummyAwsEnv();
     // Mid-stream cancel only applies when the proxy streams live; pin retry off
     // so the openai-responses path isn't buffered end-to-end.
     const savedRetry = process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
@@ -372,7 +339,6 @@ describe("startProxy (legacy)", () => {
       await waitFor(() => upstreamCancelled);
     } finally {
       globalThis.fetch = originalFetch;
-      restoreEnv();
       if (savedRetry === undefined) delete process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY;
       else process.env.BEDROCK_MANTLE_EMPTY_COMPLETION_RETRY = savedRetry;
       await proxy.close();

@@ -1,3 +1,4 @@
+import "./hermetic.mjs";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
@@ -22,27 +23,6 @@ function captureStderr(fn) {
     (result) => { process.stderr.write = original; return { result, stderr: captured.join("") }; },
     (err) => { process.stderr.write = original; throw err; },
   );
-}
-
-function installDummyAwsEnv() {
-  const saved = {
-    AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
-    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
-    AWS_SESSION_TOKEN: process.env.AWS_SESSION_TOKEN,
-    AWS_PROFILE: process.env.AWS_PROFILE,
-    BEDROCK_MANTLE_AWS_PROFILE: process.env.BEDROCK_MANTLE_AWS_PROFILE,
-  };
-  process.env.AWS_ACCESS_KEY_ID = "test";
-  process.env.AWS_SECRET_ACCESS_KEY = "test";
-  delete process.env.AWS_SESSION_TOKEN;
-  delete process.env.AWS_PROFILE;
-  delete process.env.BEDROCK_MANTLE_AWS_PROFILE;
-  return () => {
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
-  };
 }
 
 const SSE_HEADERS = { "content-type": "text/event-stream" };
@@ -73,7 +53,6 @@ function sseResponse(events) {
 
 /** Stub global fetch to return a sequence of canned responses, then restore. */
 function withMockedFetch(sequence, fn) {
-  const restoreEnv = installDummyAwsEnv();
   const original = globalThis.fetch;
   let i = 0;
   globalThis.fetch = async () => {
@@ -82,8 +61,8 @@ function withMockedFetch(sequence, fn) {
     return typeof item === "function" ? item() : item;
   };
   return Promise.resolve(fn()).then(
-    (v) => { globalThis.fetch = original; restoreEnv(); return { result: v, callCount: i }; },
-    (err) => { globalThis.fetch = original; restoreEnv(); throw err; },
+    (v) => { globalThis.fetch = original; return { result: v, callCount: i }; },
+    (err) => { globalThis.fetch = original; throw err; },
   );
 }
 

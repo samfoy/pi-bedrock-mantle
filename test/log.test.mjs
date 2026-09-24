@@ -1,3 +1,4 @@
+import "./hermetic.mjs";
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 

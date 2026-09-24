@@ -76,6 +76,11 @@ had moved well past it without a release.
   The startup cache, new in this release, used to send it to us-east-2.
 - The test suite no longer writes to a `BEDROCK_MANTLE_LOG_FILE` or
   `BEDROCK_MANTLE_EMPTY_DUMP_DIR` exported in the caller's shell.
+- The tests no longer depend on ambient AWS credentials. Only some tests set
+  fake keys, so the rest failed in CI with `CredentialsProviderError` and passed
+  locally only against a developer's `~/.aws` profile. Every test now runs with
+  fake static keys, nonexistent shared config files and IMDS off, and fails if
+  it dials a non-loopback host.
 
 Found in review before release:
 
