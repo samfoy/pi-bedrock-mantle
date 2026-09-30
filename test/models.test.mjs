@@ -52,7 +52,7 @@ const CURATED_IDS = FALLBACK_MODELS_RAW.map((model) => model.id).sort();
 function writeCacheFile(path, overrides = {}) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify({
-    version: 3,
+    version: 4,
     generatedAt: Date.now(),
     proxyPorts: { cmh: 0, iad: 0 },
     models: [FALLBACK_MODELS_RAW.find((model) => model.id === "openai.gpt-oss-20b")],
@@ -150,11 +150,47 @@ test("region selection prefers CMH for OpenAI-compatible models and falls back t
   });
 });
 
-test("only the OpenAI GPT-5 family uses Responses routing", () => {
+test("only the OpenAI GPT-5 family and Google Gemma 4 use Responses routing", () => {
   assert.equal(fallbackById("openai.gpt-5.5").api, "openai-responses");
   assert.equal(fallbackById("openai.gpt-5.5-2026-04-23").api, "openai-responses");
   assert.equal(fallbackById("openai.gpt-oss-120b").api, "openai-completions");
   assert.equal(fallbackById("qwen.qwen3-vl-235b-a22b-instruct").api, "openai-completions");
+});
+
+test("Gemma 4 models route through OpenAI Responses, not Chat Completions", async () => {
+  await withMockedFetch((url) => {
+    if (url.includes("us-east-1")) throw new Error("IAD unavailable");
+    return new Response(JSON.stringify({ data: [
+      { id: "google.gemma-4-e2b" },
+      { id: "google.gemma-4-31b" },
+      { id: "openai.gpt-oss-120b" },
+    ] }), { status: 200, headers: { "content-type": "application/json" } });
+  }, async () => {
+    const models = await fetchModels(TEST_PORTS);
+    for (const id of ["google.gemma-4-e2b", "google.gemma-4-31b"]) {
+      const model = models.find((candidate) => candidate.id === id);
+      assert.equal(model?.api, "openai-responses", id);
+      assert.match(model?.baseUrl ?? "", new RegExp(`:${TEST_PORTS.cmh}/openai/v1$`), id);
+    }
+    assert.equal(models.find((model) => model.id === "openai.gpt-oss-120b")?.api, "openai-completions");
+  });
+});
+
+test("Gemma 3 stays on Chat Completions", async () => {
+  await withMockedFetch((url) => {
+    if (url.includes("us-east-1")) throw new Error("IAD unavailable");
+    return new Response(JSON.stringify({ data: [
+      { id: "google.gemma-3-27b-it" },
+      { id: "google.gemma-3-4b-it" },
+    ] }), { status: 200, headers: { "content-type": "application/json" } });
+  }, async () => {
+    const models = await fetchModels(TEST_PORTS);
+    for (const id of ["google.gemma-3-27b-it", "google.gemma-3-4b-it"]) {
+      const model = models.find((candidate) => candidate.id === id);
+      assert.equal(model?.api, "openai-completions", id);
+      assert.match(model?.baseUrl ?? "", new RegExp(`:${TEST_PORTS.cmh}/v1$`), id);
+    }
+  });
 });
 
 test("unknown model inference keeps vision and reasoning heuristics explicit", async () => {
@@ -272,8 +308,9 @@ test("fastModels rejects caches with a stale schema version", () => {
   writeCacheFile(process.env.BEDROCK_MANTLE_MODEL_CACHE);
   assert.deepEqual(fastModels(TEST_PORTS).map((model) => model.id), ["openai.gpt-oss-20b"]);
 
-  // Version 2 caches predate baseUrl validation and must be discarded.
-  for (const version of [1, 2]) {
+  // Version 2 caches predate baseUrl validation; version 3 caches carry Gemma 4
+  // on chat completions. All must be discarded.
+  for (const version of [1, 2, 3]) {
     writeCacheFile(process.env.BEDROCK_MANTLE_MODEL_CACHE, { version });
     assert.deepEqual(fastModels(TEST_PORTS).map((model) => model.id).sort(), CURATED_IDS, `version ${version}`);
   }

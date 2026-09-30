@@ -18,7 +18,7 @@ Dynamically discovered when a session starts, from the live `/v1/models` endpoin
 - **Moonshot Kimi**: K2 Thinking, K2.5
 - **MiniMax**: M2, M2.1, M2.5
 - **NVIDIA**: Nemotron Nano, Nemotron Super
-- **Google**: Gemma 3 (4B, 12B, 27B)
+- **Google**: Gemma 3 (chat completions) and Gemma 4 (Responses API, see below)
 - **ZAI**: GLM-4.6, GLM-4.7, GLM-5
 - **Writer**: Palmyra Vision 7B
 
@@ -31,7 +31,7 @@ Falls back to the curated static list in `models.ts` if discovery fails (expired
 3. Live model discovery runs in the background — `/v1/models` queried in both regions, results merged. While discovery runs, pi uses a cached or curated fallback list so startup never blocks.
 4. Pi routes each model to the right driver based on the model id:
    - Anthropic Claude → `anthropic-messages` via `/anthropic/v1/messages`
-   - GPT-5.x → `openai-responses` via `/openai/v1/responses`
+   - GPT-5.x and Google Gemma 4 → `openai-responses` via `/openai/v1/responses` (Mantle rejects Gemma 4 on `/v1/chat/completions` with `400 ... isn't supported on this route`)
    - GPT OSS and other OpenAI-compatible models → `openai-completions` via `/v1/chat/completions`
 5. Streaming SSE responses are piped back to pi unchanged.
 
