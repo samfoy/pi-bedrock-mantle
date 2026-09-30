@@ -421,3 +421,8 @@ test("liveBaseUrl fails clearly when no proxy is live for the model", () => {
   const live = { ports: { cmh: 0, iad: 41002 }, models: [model] };
   assert.throws(() => liveBaseUrl(model, live), /proxy for openai\.gpt-oss-120b failed to bind/);
 });
+
+test("Kimi K2.5 advertises image input; K2 Thinking stays text-only", () => {
+  assert.deepEqual(fallbackById("moonshotai.kimi-k2.5").input, ["text", "image"]);
+  assert.deepEqual(fallbackById("moonshotai.kimi-k2-thinking").input, ["text"]);
+});

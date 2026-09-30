@@ -280,7 +280,7 @@ const KNOWN: Record<string, ModelSpec> = {
   "deepseek.v3.2":               { contextWindow: 163840, maxTokens: 32768, reasoning: false, input: ["text"] },
   // Moonshot Kimi
   "moonshotai.kimi-k2-thinking": { contextWindow: 128000, maxTokens: 32768, reasoning: true,  input: ["text"] },
-  "moonshotai.kimi-k2.5":        { contextWindow: 128000, maxTokens: 32768, reasoning: true,  input: ["text"] },
+  "moonshotai.kimi-k2.5":        { contextWindow: 128000, maxTokens: 32768, reasoning: true,  input: ["text", "image"] },
   // MiniMax
   "minimax.minimax-m2":          { contextWindow: 1000000, maxTokens: 65536, reasoning: false, input: ["text", "image"] },
   "minimax.minimax-m2.1":        { contextWindow: 1000000, maxTokens: 65536, reasoning: false, input: ["text", "image"] },
