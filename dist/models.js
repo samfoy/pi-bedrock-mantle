@@ -9,7 +9,7 @@
  *       baseUrl: http://localhost:57891/anthropic   (pi appends /v1/messages)
  *       headers: { anthropic-version: "2023-06-01" }
  *
- *   - GPT-5.x models:
+ *   - GPT-5.x and GPT-6 models:
  *       api: "openai-responses"
  *       baseUrl: http://localhost:57893/openai/v1   (pi appends /responses)
  *
@@ -27,8 +27,8 @@ import { fromIni, fromNodeProviderChain } from "@aws-sdk/credential-providers";
 import { SignatureV4 } from "@smithy/signature-v4";
 import { log } from "./log.js";
 import { isBoundProxyPort } from "./proxy.js";
-// 3: baseUrls are validated on read; caches from earlier versions are discarded.
-const CACHE_VERSION = 3;
+// 4: discard cached GPT-6 entries that selected the Chat Completions API.
+const CACHE_VERSION = 4;
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const CACHE_ENV = "BEDROCK_MANTLE_MODEL_CACHE";
 const CMH_PLACEHOLDER = "{{CMH_PORT}}";
@@ -241,14 +241,18 @@ const ANTHROPIC_IDS = new Set([
     "anthropic.claude-haiku-4-5",
 ]);
 // ─── Heuristics for unknown models ───────────────────────────────────────────
+function isGpt5Or6(id) {
+    return /^openai\.gpt-(?:5\.|6[.-])/.test(id);
+}
 function inferSpec(id) {
-    const reasoning = id.includes("gpt-5") || id.includes("thinking") || id.includes("kimi-k2") ||
+    const isGpt = isGpt5Or6(id);
+    const reasoning = isGpt || id.includes("thinking") || id.includes("kimi-k2") ||
         id.includes("qwq") || id.includes("o1") || id.includes("o3") || id.includes("r1") ||
         id.startsWith("anthropic.");
     const hasVision = id.includes("vision") || id.includes("-vl-") || id.includes("gemma") ||
-        id.includes("gpt-5") || id.includes("palmyra") || id.startsWith("anthropic.");
+        isGpt || id.includes("palmyra") || id.startsWith("anthropic.");
     const thinkingLevelMap = reasoning
-        ? id.includes("gpt-5")
+        ? isGpt
             ? { off: null, xhigh: "xhigh" }
             : { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh" }
         : undefined;
@@ -282,13 +286,12 @@ function displayName(id) {
     return `${label} ${formatted} (Bedrock)`;
 }
 // ─── Route assignment ─────────────────────────────────────────────────────────
-// openai.gpt-5.* (and dated variants)  → openai-responses  on us-east-2
+// GPT-5.x and GPT-6                    → openai-responses in a discovered region
 // anthropic.*                          → anthropic-messages on us-east-1
 // everything else                      → openai-completions  on us-east-2 (or us-east-1 fallback)
 function isOpenAIResponses(id) {
-    // Only the GPT-5 family uses the Responses API — gpt-oss-* and all other
-    // providers use the Chat Completions API instead.
-    return /^openai\.gpt-5\./.test(id);
+    // GPT-5.x and GPT-6 use Responses. GPT OSS keeps Chat Completions.
+    return isGpt5Or6(id);
 }
 /**
  * Build a model config with placeholder baseUrls. The placeholder port is
@@ -315,7 +318,7 @@ function buildConfig(id, regions) {
     }
     const placeholder = regions.has("us-east-2") ? CMH_PLACEHOLDER : IAD_PLACEHOLDER;
     if (isOpenAIResponses(id)) {
-        // GPT-5.x family: uses the OpenAI Responses API.
+        // GPT-5.x and GPT-6 use the OpenAI Responses API.
         return {
             ...base,
             api: "openai-responses",

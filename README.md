@@ -22,6 +22,8 @@ Dynamically discovered when a session starts, from the live `/v1/models` endpoin
 - **ZAI**: GLM-4.6, GLM-4.7, GLM-5
 - **Writer**: Palmyra Vision 7B
 
+Live discovery also finds GPT-6 Astra, GPT-6 Sol, GPT-6 Luna, and GPT-6.1 Sol.
+
 Falls back to the curated static list in `models.ts` if discovery fails (expired creds at startup). The last successful discovery is cached in `${XDG_CACHE_HOME:-~/.cache}/pi-bedrock-mantle/models.json` (override the path with `BEDROCK_MANTLE_MODEL_CACHE`) and used on the next start while discovery refreshes in the background. A cached entry whose `baseUrl` is not one of the extension's own loopback proxy routes is rejected, and the whole cache falls back to the curated list. With neither `HOME` nor `XDG_CACHE_HOME` set, caching is skipped.
 
 ## How it works
@@ -31,7 +33,7 @@ Falls back to the curated static list in `models.ts` if discovery fails (expired
 3. Live model discovery runs in the background — `/v1/models` queried in both regions, results merged. While discovery runs, pi uses a cached or curated fallback list so startup never blocks.
 4. Pi routes each model to the right driver based on the model id:
    - Anthropic Claude → `anthropic-messages` via `/anthropic/v1/messages`
-   - GPT-5.x → `openai-responses` via `/openai/v1/responses`
+   - GPT-5.x and GPT-6 → `openai-responses` via `/openai/v1/responses`
    - GPT OSS and other OpenAI-compatible models → `openai-completions` via `/v1/chat/completions`
 5. Streaming SSE responses are piped back to pi unchanged.
 
@@ -154,18 +156,14 @@ chain from the AWS SDK for JavaScript
    (`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` or `_FULL_URI`), otherwise EC2
    instance metadata unless `AWS_EC2_METADATA_DISABLED=true`.
 
-### Regions are fixed
+### Regions
 
-The region comes from the model family, not from your configuration:
+The extension queries us-east-1 and us-east-2. Anthropic models use us-east-1.
+Other models use us-east-2 when discovery finds them there.
+If discovery finds a model only in us-east-1, the extension uses that region.
 
-| Models | Region | Endpoint |
-|---|---|---|
-| GPT-5.x, GPT-OSS and the other shared models | us-east-2 | `bedrock-mantle.us-east-2.api.aws` |
-| Anthropic Claude | us-east-1 | `bedrock-mantle.us-east-1.api.aws` |
-
-A non-Claude model that discovery finds only in us-east-1 is sent there.
-`AWS_REGION`, `AWS_DEFAULT_REGION` and a profile's `region` setting are
-ignored for routing and signing, so the profile does not need one.
+The extension ignores `AWS_REGION`, `AWS_DEFAULT_REGION`, and the profile's
+`region` for routing and signing.
 
 ## Troubleshooting
 

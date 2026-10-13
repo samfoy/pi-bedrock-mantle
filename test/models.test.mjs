@@ -52,7 +52,7 @@ const CURATED_IDS = FALLBACK_MODELS_RAW.map((model) => model.id).sort();
 function writeCacheFile(path, overrides = {}) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify({
-    version: 3,
+    version: 4,
     generatedAt: Date.now(),
     proxyPorts: { cmh: 0, iad: 0 },
     models: [FALLBACK_MODELS_RAW.find((model) => model.id === "openai.gpt-oss-20b")],
@@ -105,6 +105,35 @@ test("GPT-5 models route through OpenAI Responses with image input and GPT-5 thi
   }
 });
 
+test("discovered GPT-6 models use Responses and retain their region after a cache round trip", async () => {
+  const ids = [
+    "openai.gpt-6-astra",
+    "openai.gpt-6-sol",
+    "openai.gpt-6-luna",
+    "openai.gpt-6.1-sol",
+  ];
+  await withMockedFetch((url) => new Response(JSON.stringify({
+    data: (url.includes("us-east-1") ? ids : ["openai.gpt-6-sol"]).map((id) => ({ id })),
+  }), { status: 200, headers: { "content-type": "application/json" } }), async () => {
+    const live = await fetchModels(TEST_PORTS);
+    const restarted = { cmh: 11111, iad: 22222 };
+    const fromCache = fastModels(restarted);
+
+    for (const [models, ports] of [[live, TEST_PORTS], [fromCache, restarted]]) {
+      for (const id of ids) {
+        const model = models.find((candidate) => candidate.id === id);
+        assert.ok(model, `expected discovered model ${id}`);
+        assert.equal(model.api, "openai-responses", id);
+        const port = id === "openai.gpt-6-sol" ? ports.cmh : ports.iad;
+        assert.equal(model.baseUrl, `http://127.0.0.1:${port}/openai/v1`, id);
+        assert.equal(model.reasoning, true, id);
+        assert.deepEqual(model.input, ["text", "image"], id);
+        assert.deepEqual(model.thinkingLevelMap, { off: null, xhigh: "xhigh" }, id);
+      }
+    }
+  });
+});
+
 test("GPT OSS models route through OpenAI Chat Completions without image input", () => {
   for (const id of ["openai.gpt-oss-120b", "openai.gpt-oss-20b"]) {
     const model = fallbackById(id);
@@ -150,7 +179,7 @@ test("region selection prefers CMH for OpenAI-compatible models and falls back t
   });
 });
 
-test("only the OpenAI GPT-5 family uses Responses routing", () => {
+test("curated GPT-5 models use Responses while GPT OSS and Qwen use Chat Completions", () => {
   assert.equal(fallbackById("openai.gpt-5.5").api, "openai-responses");
   assert.equal(fallbackById("openai.gpt-5.5-2026-04-23").api, "openai-responses");
   assert.equal(fallbackById("openai.gpt-oss-120b").api, "openai-completions");
@@ -272,11 +301,27 @@ test("fastModels rejects caches with a stale schema version", () => {
   writeCacheFile(process.env.BEDROCK_MANTLE_MODEL_CACHE);
   assert.deepEqual(fastModels(TEST_PORTS).map((model) => model.id), ["openai.gpt-oss-20b"]);
 
-  // Version 2 caches predate baseUrl validation and must be discarded.
-  for (const version of [1, 2]) {
+  // Old caches predate baseUrl validation or select incorrect GPT-6 routes.
+  for (const version of [1, 2, 3]) {
     writeCacheFile(process.env.BEDROCK_MANTLE_MODEL_CACHE, { version });
     assert.deepEqual(fastModels(TEST_PORTS).map((model) => model.id).sort(), CURATED_IDS, `version ${version}`);
   }
+});
+
+test("fastModels rejects version 3 caches with incorrect GPT-6 routes", () => {
+  withFakeAwsCredentials();
+  writeCacheFile(process.env.BEDROCK_MANTLE_MODEL_CACHE, {
+    version: 3,
+    models: [{
+      ...FALLBACK_MODELS_RAW.find((model) => model.id === "openai.gpt-oss-20b"),
+      id: "openai.gpt-6-astra",
+      name: "OpenAI GPT 6 Astra (Bedrock)",
+      api: "openai-completions",
+      baseUrl: "http://127.0.0.1:{{IAD_PORT}}/v1",
+    }],
+  });
+
+  assert.deepEqual(fastModels(TEST_PORTS).map((model) => model.id).sort(), CURATED_IDS);
 });
 
 test("fastModels rejects a cache whose baseUrl leaves the loopback proxy", () => {

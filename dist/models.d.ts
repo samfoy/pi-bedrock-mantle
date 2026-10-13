@@ -9,7 +9,7 @@
  *       baseUrl: http://localhost:57891/anthropic   (pi appends /v1/messages)
  *       headers: { anthropic-version: "2023-06-01" }
  *
- *   - GPT-5.x models:
+ *   - GPT-5.x and GPT-6 models:
  *       api: "openai-responses"
  *       baseUrl: http://localhost:57893/openai/v1   (pi appends /responses)
  *
